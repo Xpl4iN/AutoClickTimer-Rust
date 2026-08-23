@@ -1,0 +1,924 @@
+import { Button, ScrollView, CheckBox, LineEdit, TextEdit, ComboBox } from "std-widgets.slint";
+
+export struct QueueItemData {
+    id: int,
+    label: string,
+    meta: string,
+    countdown: string,
+    status_text: string,
+    progress: float,
+    status: string, // "waiting", "running", "done"
+    countdown_color: color,
+}
+
+export component AppWindow inherits Window {
+    title: "AutoClick Timer v1.2.1";
+    min-width: 780px;
+    min-height: 640px;
+    preferred-width: 960px;
+    preferred-height: 740px;
+    background: #0f0f10;
+    default-font-family: "Segoe UI";
+
+    // Callbacks to Rust backend
+    callback add_item(int, string, string, string, int, int, string, bool);
+    callback add_preset(string, int);
+    callback remove_item(int);
+    callback start_queue();
+    callback start_later();
+    callback stop_queue();
+    callback reset_queue();
+    callback clear_queue();
+    callback save_queue();
+    callback load_queue();
+    callback toggle_caffeine(bool);
+    callback switch_language(string);
+    callback apply_update();
+    callback clear_log();
+    callback refresh_windows();
+
+    // Bound properties from Rust backend
+    in-out property <[QueueItemData]> queue_items: [];
+    in-out property <bool> is_running: false;
+    in-out property <bool> caffeine_active: false;
+    in-out property <string> current_language: "DE";
+    in-out property <bool> update_available: false;
+    in-out property <string> update_tag: "";
+    in-out property <string> log_preview: "Bereit. Keine Aktionen ausgeführt.";
+    in-out property <int> log_count: 0;
+    in-out property <[string]> log_lines: [];
+    in-out property <[string]> window_list: ["(Global / Aktives Fenster)"];
+    in-out property <string> selected_window: "(Global / Aktives Fenster)";
+    in-out property <string> status_text: "";
+    in-out property <string> failsafe_text: "Notfall-Stop: Maus ganz oben-links in die Bildschirmecke schieben";
+
+    // Local UI state
+    property <int> active_tab: 0; // 0 = Action, 1 = Presets
+    property <int> mode_type: 0; // 0 = Duration, 1 = Clock
+    property <string> selected_action: "enter"; // "enter", "click", "type", "sleep", "shutdown"
+    property <bool> log_expanded: false;
+
+    // Form inputs state
+    property <string> input_h: "0";
+    property <string> input_m: "0";
+    property <string> input_s: "5";
+    property <string> input_prompt: "";
+    property <string> input_label: "";
+    property <int> input_grace: 5;
+    property <int> input_postwake: 30;
+    property <bool> input_require_fg: false;
+
+    VerticalLayout {
+        padding-left: 18px;
+        padding-right: 18px;
+        padding-top: 14px;
+        padding-bottom: 14px;
+        spacing: 12px;
+
+        // ---- Header ----
+        HorizontalLayout {
+            height: 38px;
+            spacing: 12px;
+            alignment: space-between;
+
+            // Title
+            HorizontalLayout {
+                spacing: 8px;
+                alignment: start;
+                Text {
+                    text: "AutoClick Timer";
+                    font-size: 18px;
+                    font-weight: 700;
+                    color: #e8e8ea;
+                    vertical-alignment: center;
+                }
+                Text {
+                    text: "v1.2.1";
+                    font-size: 11px;
+                    font-weight: 600;
+                    color: #4891A1;
+                    vertical-alignment: center;
+                }
+            }
+
+            // Right Header Controls
+            HorizontalLayout {
+                spacing: 10px;
+                alignment: end;
+
+                // Failsafe Tip
+                Text {
+                    text: root.failsafe_text;
+                    font-size: 10px;
+                    font-weight: 600;
+                    color: #f87171;
+                    vertical-alignment: center;
+                    horizontal-alignment: right;
+                }
+
+                // Update Button (if available)
+                if root.update_available: Rectangle {
+                    width: 110px;
+                    height: 28px;
+                    background: #fbbf24;
+                    border-radius: 6px;
+                    TouchArea {
+                        clicked => { root.apply_update(); }
+                    }
+                    Text {
+                        text: "Update " + root.update_tag;
+                        font-size: 10px;
+                        font-weight: 700;
+                        color: #1a1a1a;
+                        vertical-alignment: center;
+                        horizontal-alignment: center;
+                    }
+                }
+
+                // Caffeine Toggle Button
+                Rectangle {
+                    width: 86px;
+                    height: 28px;
+                    background: root.caffeine_active ? #4891A1 : #16161a;
+                    border-width: 1px;
+                    border-color: root.caffeine_active ? #4891A1 : #3f3f4c;
+                    border-radius: 6px;
+
+                    TouchArea {
+                        clicked => {
+                            root.caffeine_active = !root.caffeine_active;
+                            root.toggle_caffeine(root.caffeine_active);
+                        }
+                    }
+
+                    HorizontalLayout {
+                        alignment: center;
+                        spacing: 4px;
+                        Text {
+                            text: "Caffeine";
+                            font-size: 11px;
+                            font-weight: 600;
+                            color: root.caffeine_active ? #ffffff : #8b8b99;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+
+                // Language Switcher (DE / EN)
+                Rectangle {
+                    width: 76px;
+                    height: 28px;
+                    background: #16161a;
+                    border-width: 1px;
+                    border-color: #3f3f4c;
+                    border-radius: 6px;
+
+                    HorizontalLayout {
+                        padding: 2px;
+                        spacing: 2px;
+
+                        Rectangle {
+                            background: root.current_language == "DE" ? #4891A1 : transparent;
+                            border-radius: 4px;
+                            TouchArea {
+                                clicked => {
+                                    root.current_language = "DE";
+                                    root.switch_language("DE");
+                                }
+                            }
+                            Text {
+                                text: "DE";
+                                font-size: 10px;
+                                font-weight: 700;
+                                color: root.current_language == "DE" ? #ffffff : #8b8b99;
+                                vertical-alignment: center;
+                                horizontal-alignment: center;
+                            }
+                        }
+
+                        Rectangle {
+                            background: root.current_language == "EN" ? #4891A1 : transparent;
+                            border-radius: 4px;
+                            TouchArea {
+                                clicked => {
+                                    root.current_language = "EN";
+                                    root.switch_language("EN");
+                                }
+                            }
+                            Text {
+                                text: "EN";
+                                font-size: 10px;
+                                font-weight: 700;
+                                color: root.current_language == "EN" ? #ffffff : #8b8b99;
+                                vertical-alignment: center;
+                                horizontal-alignment: center;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // ---- Main Content Area (Left: Form/Presets + Log, Right: Queue + Controls) ----
+        HorizontalLayout {
+            spacing: 14px;
+
+            // ---- Left Column ----
+            VerticalLayout {
+                horizontal-stretch: 0;
+                min-width: 380px;
+                max-width: 440px;
+                spacing: 10px;
+
+                // Tab Switcher
+                HorizontalLayout {
+                    height: 32px;
+                    spacing: 4px;
+
+                    Rectangle {
+                        background: root.active_tab == 0 ? #4891A1 : #16161a;
+                        border-width: 1px;
+                        border-color: root.active_tab == 0 ? #4891A1 : #3f3f4c;
+                        border-radius: 6px;
+                        TouchArea { clicked => { root.active_tab = 0; } }
+                        Text {
+                            text: root.current_language == "DE" ? "Aktion erstellen" : "Create Action";
+                            font-size: 11px;
+                            font-weight: 600;
+                            color: root.active_tab == 0 ? #ffffff : #e8e8ea;
+                            vertical-alignment: center;
+                            horizontal-alignment: center;
+                        }
+                    }
+
+                    Rectangle {
+                        background: root.active_tab == 1 ? #4891A1 : #16161a;
+                        border-width: 1px;
+                        border-color: root.active_tab == 1 ? #4891A1 : #3f3f4c;
+                        border-radius: 6px;
+                        TouchArea { clicked => { root.active_tab = 1; } }
+                        Text {
+                            text: root.current_language == "DE" ? "Vorlagen" : "Presets";
+                            font-size: 11px;
+                            font-weight: 600;
+                            color: root.active_tab == 1 ? #ffffff : #e8e8ea;
+                            vertical-alignment: center;
+                            horizontal-alignment: center;
+                        }
+                    }
+                }
+
+                // Action Creation Card
+                if root.active_tab == 0: Rectangle {
+                    background: #16161a;
+                    border-width: 1px;
+                    border-color: #3f3f4c;
+                    border-radius: 10px;
+
+                    VerticalLayout {
+                        padding: 12px;
+                        spacing: 8px;
+
+                        // Mode Selector
+                        HorizontalLayout {
+                            spacing: 12px;
+                            Text {
+                                text: root.current_language == "DE" ? "Modus:" : "Mode:";
+                                font-size: 11px;
+                                color: #8b8b99;
+                                vertical-alignment: center;
+                            }
+                            Rectangle {
+                                width: 80px;
+                                height: 24px;
+                                background: root.mode_type == 0 ? #202026 : transparent;
+                                border-radius: 4px;
+                                TouchArea { clicked => { root.mode_type = 0; } }
+                                Text {
+                                    text: "Timer";
+                                    font-size: 10px;
+                                    font-weight: root.mode_type == 0 ? 700 : 400;
+                                    color: root.mode_type == 0 ? #4891A1 : #8b8b99;
+                                    vertical-alignment: center;
+                                    horizontal-alignment: center;
+                                }
+                            }
+                        }
+
+                        // Time Input Fields
+                        HorizontalLayout {
+                            spacing: 8px;
+                            VerticalLayout {
+                                Text { text: root.current_language == "DE" ? "Stunden" : "Hours"; font-size: 10px; color: #8b8b99; }
+                                LineEdit { text <=> root.input_h; font-size: 12px; height: 30px; }
+                            }
+                            VerticalLayout {
+                                Text { text: root.current_language == "DE" ? "Minuten" : "Minutes"; font-size: 10px; color: #8b8b99; }
+                                LineEdit { text <=> root.input_m; font-size: 12px; height: 30px; }
+                            }
+                            VerticalLayout {
+                                Text { text: root.current_language == "DE" ? "Sekunden" : "Seconds"; font-size: 10px; color: #8b8b99; }
+                                LineEdit { text <=> root.input_s; font-size: 12px; height: 30px; }
+                            }
+                        }
+
+                        // Quick Presets Row
+                        HorizontalLayout {
+                            spacing: 4px;
+                            height: 24px;
+                            Rectangle {
+                                background: #202026; border-radius: 4px;
+                                TouchArea { clicked => { root.input_h = "0"; root.input_m = "15"; root.input_s = "0"; } }
+                                Text { text: "15m"; font-size: 10px; color: #e8e8ea; vertical-alignment: center; horizontal-alignment: center; }
+                            }
+                            Rectangle {
+                                background: #202026; border-radius: 4px;
+                                TouchArea { clicked => { root.input_h = "0"; root.input_m = "30"; root.input_s = "0"; } }
+                                Text { text: "30m"; font-size: 10px; color: #e8e8ea; vertical-alignment: center; horizontal-alignment: center; }
+                            }
+                            Rectangle {
+                                background: #202026; border-radius: 4px;
+                                TouchArea { clicked => { root.input_h = "1"; root.input_m = "0"; root.input_s = "0"; } }
+                                Text { text: "1h"; font-size: 10px; color: #e8e8ea; vertical-alignment: center; horizontal-alignment: center; }
+                            }
+                            Rectangle {
+                                background: #202026; border-radius: 4px;
+                                TouchArea { clicked => { root.input_h = "2"; root.input_m = "0"; root.input_s = "0"; } }
+                                Text { text: "2h"; font-size: 10px; color: #e8e8ea; vertical-alignment: center; horizontal-alignment: center; }
+                            }
+                            Rectangle {
+                                background: #202026; border-radius: 4px;
+                                TouchArea { clicked => { root.input_h = "4"; root.input_m = "0"; root.input_s = "0"; } }
+                                Text { text: "4h"; font-size: 10px; color: #e8e8ea; vertical-alignment: center; horizontal-alignment: center; }
+                            }
+                        }
+
+                        // Action Selector Segmented Bar
+                        Text {
+                            text: root.current_language == "DE" ? "Aktionstyp:" : "Action Type:";
+                            font-size: 10px;
+                            font-weight: 600;
+                            color: #8b8b99;
+                        }
+
+                        HorizontalLayout {
+                            height: 28px;
+                            spacing: 4px;
+
+                            Rectangle {
+                                background: root.selected_action == "enter" ? #4891A1 : #202026;
+                                border-radius: 4px;
+                                TouchArea { clicked => { root.selected_action = "enter"; } }
+                                Text { text: "Enter"; font-size: 10px; font-weight: 600; color: #ffffff; vertical-alignment: center; horizontal-alignment: center; }
+                            }
+                            Rectangle {
+                                background: root.selected_action == "click" ? #4891A1 : #202026;
+                                border-radius: 4px;
+                                TouchArea { clicked => { root.selected_action = "click"; } }
+                                Text { text: root.current_language == "DE" ? "Klick" : "Click"; font-size: 10px; font-weight: 600; color: #ffffff; vertical-alignment: center; horizontal-alignment: center; }
+                            }
+                            Rectangle {
+                                background: root.selected_action == "type" ? #4891A1 : #202026;
+                                border-radius: 4px;
+                                TouchArea { clicked => { root.selected_action = "type"; } }
+                                Text { text: "Prompt"; font-size: 10px; font-weight: 600; color: #ffffff; vertical-alignment: center; horizontal-alignment: center; }
+                            }
+                            Rectangle {
+                                background: root.selected_action == "sleep" ? #4891A1 : #202026;
+                                border-radius: 4px;
+                                TouchArea { clicked => { root.selected_action = "sleep"; } }
+                                Text { text: "Sleep"; font-size: 10px; font-weight: 600; color: #ffffff; vertical-alignment: center; horizontal-alignment: center; }
+                            }
+                            Rectangle {
+                                background: root.selected_action == "shutdown" ? #4891A1 : #202026;
+                                border-radius: 4px;
+                                TouchArea { clicked => { root.selected_action = "shutdown"; } }
+                                Text { text: root.current_language == "DE" ? "Aus" : "Shutdown"; font-size: 10px; font-weight: 600; color: #ffffff; vertical-alignment: center; horizontal-alignment: center; }
+                            }
+                        }
+
+                        // Prompt text field if "type" is selected
+                        if root.selected_action == "type": VerticalLayout {
+                            spacing: 4px;
+                            Text {
+                                text: root.current_language == "DE" ? "Prompt-Text (eingefügt + Enter):" : "Prompt Text (pasted + Enter):";
+                                font-size: 10px;
+                                color: #8b8b99;
+                            }
+                            LineEdit {
+                                text <=> root.input_prompt;
+                                font-size: 11px;
+                                height: 30px;
+                            }
+                        }
+
+                        // Target Window Selector (if not sleep or shutdown)
+                        if root.selected_action != "sleep" && root.selected_action != "shutdown": VerticalLayout {
+                            spacing: 4px;
+                            Text {
+                                text: root.current_language == "DE" ? "Ziel-Fenster (Background-Input):" : "Target Window (Background Input):";
+                                font-size: 10px;
+                                color: #8b8b99;
+                            }
+                            HorizontalLayout {
+                                spacing: 6px;
+                                ComboBox {
+                                    model: root.window_list;
+                                    current-value <=> root.selected_window;
+                                    height: 30px;
+                                }
+                                Rectangle {
+                                    width: 30px;
+                                    height: 30px;
+                                    background: #202026;
+                                    border-radius: 6px;
+                                    TouchArea { clicked => { root.refresh_windows(); } }
+                                    Text { text: "↺"; font-size: 14px; color: #e8e8ea; vertical-alignment: center; horizontal-alignment: center; }
+                                }
+                            }
+                            CheckBox {
+                                text: root.current_language == "DE" ? "In den Vordergrund holen" : "Force bring to foreground";
+                                checked <=> root.input_require_fg;
+                            }
+                        }
+
+                        // Label
+                        HorizontalLayout {
+                            spacing: 8px;
+                            Text {
+                                text: root.current_language == "DE" ? "Label:" : "Label:";
+                                font-size: 10px;
+                                color: #8b8b99;
+                                vertical-alignment: center;
+                            }
+                            LineEdit {
+                                text <=> root.input_label;
+                                font-size: 11px;
+                                height: 28px;
+                            }
+                        }
+
+                        // Add Button
+                        Rectangle {
+                            height: 32px;
+                            background: #4891A1;
+                            border-radius: 6px;
+                            TouchArea {
+                                clicked => {
+                                    root.add_item(
+                                        root.input_h.to-float() * 3600 + root.input_m.to-float() * 60 + root.input_s.to-float(),
+                                        root.selected_action,
+                                        root.input_prompt,
+                                        root.input_label,
+                                        root.input_grace,
+                                        root.input_postwake,
+                                        root.selected_window,
+                                        root.input_require_fg
+                                    );
+                                }
+                            }
+                            Text {
+                                text: root.current_language == "DE" ? "+ Zur Warteschlange" : "+ Add to Queue";
+                                font-size: 11px;
+                                font-weight: 700;
+                                color: #ffffff;
+                                vertical-alignment: center;
+                                horizontal-alignment: center;
+                            }
+                        }
+                    }
+                }
+
+                // Presets Card
+                if root.active_tab == 1: Rectangle {
+                    background: #16161a;
+                    border-width: 1px;
+                    border-color: #3f3f4c;
+                    border-radius: 10px;
+
+                    VerticalLayout {
+                        padding: 12px;
+                        spacing: 8px;
+
+                        Text {
+                            text: root.current_language == "DE" ? "SCHNELL-VORLAGEN" : "QUICK PRESETS";
+                            font-size: 10px;
+                            font-weight: 700;
+                            color: #8b8b99;
+                        }
+
+                        // Preset 1: Sleep + Enter
+                        Rectangle {
+                            background: #202026;
+                            border-radius: 6px;
+                            VerticalLayout {
+                                padding: 8px;
+                                HorizontalLayout {
+                                    alignment: space-between;
+                                    VerticalLayout {
+                                        Text { text: "Sleep & Wake + Enter"; font-size: 11px; font-weight: 700; color: #e8e8ea; }
+                                        Text { text: root.current_language == "DE" ? "Ruhezustand & Enter nach Aufwachen" : "Sleep & Enter after wake"; font-size: 9px; color: #8b8b99; }
+                                    }
+                                    Rectangle {
+                                        width: 60px; height: 26px; background: #4891A1; border-radius: 4px;
+                                        TouchArea { clicked => { root.add_preset("enter", root.input_h.to-float() * 3600 + root.input_m.to-float() * 60 + root.input_s.to-float()); } }
+                                        Text { text: "+ Add"; font-size: 10px; font-weight: 700; color: #fff; vertical-alignment: center; horizontal-alignment: center; }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Preset 2: Sleep + Click
+                        Rectangle {
+                            background: #202026;
+                            border-radius: 6px;
+                            VerticalLayout {
+                                padding: 8px;
+                                HorizontalLayout {
+                                    alignment: space-between;
+                                    VerticalLayout {
+                                        Text { text: "Sleep & Wake + Klick"; font-size: 11px; font-weight: 700; color: #e8e8ea; }
+                                        Text { text: root.current_language == "DE" ? "Ruhezustand & Linksklick nach Aufwachen" : "Sleep & Click after wake"; font-size: 9px; color: #8b8b99; }
+                                    }
+                                    Rectangle {
+                                        width: 60px; height: 26px; background: #4891A1; border-radius: 4px;
+                                        TouchArea { clicked => { root.add_preset("click", root.input_h.to-float() * 3600 + root.input_m.to-float() * 60 + root.input_s.to-float()); } }
+                                        Text { text: "+ Add"; font-size: 10px; font-weight: 700; color: #fff; vertical-alignment: center; horizontal-alignment: center; }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Preset 3: Timer + Shutdown
+                        Rectangle {
+                            background: #202026;
+                            border-radius: 6px;
+                            VerticalLayout {
+                                padding: 8px;
+                                HorizontalLayout {
+                                    alignment: space-between;
+                                    VerticalLayout {
+                                        Text { text: "Timer + Herunterfahren"; font-size: 11px; font-weight: 700; color: #e8e8ea; }
+                                        Text { text: root.current_language == "DE" ? "PC nach Zeitablauf ausschalten" : "Shut down PC after timer"; font-size: 9px; color: #8b8b99; }
+                                    }
+                                    Rectangle {
+                                        width: 60px; height: 26px; background: #4891A1; border-radius: 4px;
+                                        TouchArea { clicked => { root.add_preset("shutdown", root.input_h.to-float() * 3600 + root.input_m.to-float() * 60 + root.input_s.to-float()); } }
+                                        Text { text: "+ Add"; font-size: 10px; font-weight: 700; color: #fff; vertical-alignment: center; horizontal-alignment: center; }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Collapsible Log Drawer
+                Rectangle {
+                    background: #16161a;
+                    border-width: 1px;
+                    border-color: #3f3f4c;
+                    border-radius: 10px;
+
+                    VerticalLayout {
+                        padding: 8px;
+                        spacing: 6px;
+
+                        HorizontalLayout {
+                            height: 26px;
+                            alignment: space-between;
+
+                            HorizontalLayout {
+                                spacing: 6px;
+                                Rectangle {
+                                    width: 70px;
+                                    height: 24px;
+                                    background: #202026;
+                                    border-radius: 4px;
+                                    TouchArea { clicked => { root.log_expanded = !root.log_expanded; } }
+                                    Text {
+                                        text: (root.log_expanded ? "Log ▼" : "Log ▲") + (root.log_count > 0 ? " (" + root.log_count + ")" : "");
+                                        font-size: 10px;
+                                        font-weight: 600;
+                                        color: #e8e8ea;
+                                        vertical-alignment: center;
+                                        horizontal-alignment: center;
+                                    }
+                                }
+
+                                Text {
+                                    text: root.log_preview;
+                                    font-size: 10px;
+                                    color: #8b8b99;
+                                    vertical-alignment: center;
+                                    overflow: elide;
+                                }
+                            }
+
+                            Rectangle {
+                                width: 44px;
+                                height: 22px;
+                                background: transparent;
+                                border-width: 1px;
+                                border-color: #3f3f4c;
+                                border-radius: 4px;
+                                TouchArea { clicked => { root.clear_log(); } }
+                                Text {
+                                    text: root.current_language == "DE" ? "Clear" : "Clear";
+                                    font-size: 9px;
+                                    color: #8b8b99;
+                                    vertical-alignment: center;
+                                    horizontal-alignment: center;
+                                }
+                            }
+                        }
+
+                        if root.log_expanded: ScrollView {
+                            height: 120px;
+                            VerticalLayout {
+                                spacing: 2px;
+                                for line in root.log_lines: Text {
+                                    text: line;
+                                    font-size: 10px;
+                                    font-family: "Consolas";
+                                    color: #e8e8ea;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ---- Right Column: Queue & Controls ----
+            VerticalLayout {
+                horizontal-stretch: 1;
+                min-width: 340px;
+                spacing: 10px;
+
+                HorizontalLayout {
+                    alignment: space-between;
+                    Text {
+                        text: root.current_language == "DE" ? "WARTESCHLANGE" : "QUEUE";
+                        font-size: 11px;
+                        font-weight: 700;
+                        color: #8b8b99;
+                    }
+                    Text {
+                        text: root.status_text;
+                        font-size: 11px;
+                        color: #4891A1;
+                    }
+                }
+
+                // Queue List Container
+                Rectangle {
+                    background: #16161a;
+                    border-width: 1px;
+                    border-color: #3f3f4c;
+                    border-radius: 10px;
+
+                    VerticalLayout {
+                        padding: 8px;
+
+                        if root.queue_items.length == 0: VerticalLayout {
+                            alignment: center;
+                            height: 240px;
+                            Text {
+                                text: root.current_language == "DE" ? "Noch keine Aktionen - füge deine erste links hinzu." : "No actions yet - add your first one on the left.";
+                                font-size: 11px;
+                                color: #8b8b99;
+                                horizontal-alignment: center;
+                            }
+                        }
+
+                        if root.queue_items.length > 0: ScrollView {
+                            height: 380px;
+
+                            VerticalLayout {
+                                spacing: 6px;
+                                padding: 4px;
+
+                                for item[idx] in root.queue_items: Rectangle {
+                                    background: #202026;
+                                    border-width: 1px;
+                                    border-color: item.status == "running" ? #4891A1 : (item.status == "done" ? #4ade80 : #3f3f4c);
+                                    border-radius: 8px;
+
+                                    VerticalLayout {
+                                        padding: 8px;
+                                        spacing: 4px;
+
+                                        HorizontalLayout {
+                                            alignment: space-between;
+
+                                            // Left: Badge + Label + Meta
+                                            HorizontalLayout {
+                                                spacing: 8px;
+                                                Rectangle {
+                                                    width: 20px;
+                                                    height: 20px;
+                                                    background: item.status == "running" ? #4891A1 : (item.status == "done" ? #4ade80 : #2a2a33);
+                                                    border-radius: 10px;
+                                                    Text {
+                                                        text: idx + 1;
+                                                        font-size: 10px;
+                                                        font-weight: 700;
+                                                        color: #fff;
+                                                        vertical-alignment: center;
+                                                        horizontal-alignment: center;
+                                                    }
+                                                }
+                                                VerticalLayout {
+                                                    Text {
+                                                        text: item.label;
+                                                        font-size: 11px;
+                                                        font-weight: 700;
+                                                        color: #e8e8ea;
+                                                    }
+                                                    Text {
+                                                        text: item.meta;
+                                                        font-size: 9px;
+                                                        color: #8b8b99;
+                                                    }
+                                                }
+                                            }
+
+                                            // Right: Status + Countdown + Delete
+                                            HorizontalLayout {
+                                                spacing: 8px;
+                                                VerticalLayout {
+                                                    alignment: end;
+                                                    Text {
+                                                        text: item.status_text;
+                                                        font-size: 9px;
+                                                        color: #8b8b99;
+                                                        horizontal-alignment: right;
+                                                    }
+                                                    Text {
+                                                        text: item.countdown;
+                                                        font-size: 13px;
+                                                        font-weight: 700;
+                                                        color: item.countdown_color;
+                                                        horizontal-alignment: right;
+                                                    }
+                                                }
+
+                                                if !root.is_running: Rectangle {
+                                                    width: 22px;
+                                                    height: 22px;
+                                                    background: transparent;
+                                                    border-radius: 4px;
+                                                    TouchArea {
+                                                        clicked => { root.remove_item(idx); }
+                                                    }
+                                                    Text {
+                                                        text: "✕";
+                                                        font-size: 11px;
+                                                        color: #8b8b99;
+                                                        vertical-alignment: center;
+                                                        horizontal-alignment: center;
+                                                    }
+                                                }
+                                            }
+                                        }
+
+                                        // Progress bar
+                                        Rectangle {
+                                            height: 4px;
+                                            background: #2a2a33;
+                                            border-radius: 2px;
+
+                                            Rectangle {
+                                                x: 0;
+                                                width: parent.width * item.progress;
+                                                height: 4px;
+                                                background: item.status == "done" ? #4ade80 : #4891A1;
+                                                border-radius: 2px;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Controls Bar
+                HorizontalLayout {
+                    spacing: 6px;
+                    height: 34px;
+
+                    // Start
+                    Rectangle {
+                        background: root.is_running ? #202026 : #4891A1;
+                        border-radius: 6px;
+                        TouchArea { clicked => { if (!root.is_running) { root.start_queue(); } } }
+                        Text {
+                            text: root.current_language == "DE" ? "Starten" : "Start";
+                            font-size: 11px;
+                            font-weight: 700;
+                            color: #ffffff;
+                            vertical-alignment: center;
+                            horizontal-alignment: center;
+                        }
+                    }
+
+                    // Later...
+                    Rectangle {
+                        background: #16161a;
+                        border-width: 1px;
+                        border-color: #4891A1;
+                        border-radius: 6px;
+                        TouchArea { clicked => { if (!root.is_running) { root.start_later(); } } }
+                        Text {
+                            text: root.current_language == "DE" ? "Später..." : "Later...";
+                            font-size: 10px;
+                            color: #e8e8ea;
+                            vertical-alignment: center;
+                            horizontal-alignment: center;
+                        }
+                    }
+
+                    // Stop
+                    Rectangle {
+                        background: #16161a;
+                        border-width: 1px;
+                        border-color: #3f3f4c;
+                        border-radius: 6px;
+                        TouchArea { clicked => { root.stop_queue(); } }
+                        Text {
+                            text: "Stop";
+                            font-size: 10px;
+                            color: #e8e8ea;
+                            vertical-alignment: center;
+                            horizontal-alignment: center;
+                        }
+                    }
+
+                    // Reset
+                    Rectangle {
+                        background: #16161a;
+                        border-width: 1px;
+                        border-color: #3f3f4c;
+                        border-radius: 6px;
+                        TouchArea { clicked => { root.reset_queue(); } }
+                        Text {
+                            text: "Reset";
+                            font-size: 10px;
+                            color: #e8e8ea;
+                            vertical-alignment: center;
+                            horizontal-alignment: center;
+                        }
+                    }
+
+                    // Clear
+                    Rectangle {
+                        background: #16161a;
+                        border-width: 1px;
+                        border-color: #3f3f4c;
+                        border-radius: 6px;
+                        TouchArea { clicked => { root.clear_queue(); } }
+                        Text {
+                            text: root.current_language == "DE" ? "Leeren" : "Clear";
+                            font-size: 10px;
+                            color: #f87171;
+                            vertical-alignment: center;
+                            horizontal-alignment: center;
+                        }
+                    }
+
+                    // Save
+                    Rectangle {
+                        background: #16161a;
+                        border-width: 1px;
+                        border-color: #3f3f4c;
+                        border-radius: 6px;
+                        TouchArea { clicked => { root.save_queue(); } }
+                        Text {
+                            text: root.current_language == "DE" ? "Speichern" : "Save";
+                            font-size: 10px;
+                            color: #e8e8ea;
+                            vertical-alignment: center;
+                            horizontal-alignment: center;
+                        }
+                    }
+
+                    // Load
+                    Rectangle {
+                        background: #16161a;
+                        border-width: 1px;
+                        border-color: #3f3f4c;
+                        border-radius: 6px;
+                        TouchArea { clicked => { root.load_queue(); } }
+                        Text {
+                            text: root.current_language == "DE" ? "Laden" : "Load";
+                            font-size: 10px;
+                            color: #e8e8ea;
+                            vertical-alignment: center;
+                            horizontal-alignment: center;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
