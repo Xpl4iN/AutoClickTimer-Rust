@@ -116,8 +116,8 @@ fn lookup(key: &'static str, is_en: bool) -> &'static str {
         ("add_to_queue", true) => "+ Add to Queue",
 
         // Default labels
-        ("default_sleep_label", false) => "Ruhezustand",
-        ("default_sleep_label", true) => "Sleep Mode",
+        ("default_sleep_label", false) => "Sleep & Wake",
+        ("default_sleep_label", true) => "Sleep & Wake",
         ("default_shutdown_label", false) => "Herunterfahren",
         ("default_shutdown_label", true) => "Shut Down",
         ("post_wake_enter", false) => "Enter nach Aufwachen",
@@ -228,7 +228,6 @@ pub fn fmt_time(seconds: u64) -> String {
     format!("{:02}:{:02}:{:02}", h, m, s)
 }
 
-#[allow(dead_code)]
 pub fn fmt_short(seconds: u64) -> String {
     let h = seconds / 3600;
     let m = (seconds % 3600) / 60;
@@ -245,3 +244,13 @@ pub fn fmt_short(seconds: u64) -> String {
     }
     parts.join(" ")
 }
+
+pub fn format_clock_preview(delta_secs: u64, target_time: &str) -> String {
+    let is_en = CURRENT_LANG.load(Ordering::SeqCst) == LANG_EN;
+    if is_en {
+        format!("-> in {} (at {})", fmt_short(delta_secs), target_time)
+    } else {
+        format!("-> in {} (um {})", fmt_short(delta_secs), target_time)
+    }
+}
+

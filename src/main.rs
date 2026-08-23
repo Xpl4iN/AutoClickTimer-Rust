@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use chrono::Local;
+use chrono::{Local, Timelike};
 use slint::{Color, ModelRc, VecModel};
 
 use crate::executor::{ExecutorEvent, QueueExecutor};
@@ -28,6 +28,33 @@ struct AppState {
     queue: Vec<Item>,
     log_lines: Vec<String>,
     update_info: Option<UpdateInfo>,
+}
+
+fn compute_seconds(mode: i32, h: i32, m: i32, s: i32) -> u64 {
+    if mode == 0 {
+        // Duration mode
+        (h.max(0) as u64 * 3600) + (m.max(0) as u64 * 60) + (s.max(0) as u64)
+    } else {
+        // Clock mode
+        let now = Local::now();
+        let target_time = chrono::NaiveTime::from_hms_opt(
+            h.clamp(0, 23) as u32,
+            m.clamp(0, 59) as u32,
+            s.clamp(0, 59) as u32,
+        ).unwrap_or_else(|| now.time());
+
+        let mut target_dt = now.date_naive()
+            .and_time(target_time)
+            .and_local_timezone(Local)
+            .single()
+            .unwrap_or(now);
+
+        if target_dt <= now {
+            target_dt = target_dt + chrono::Duration::days(1);
+        }
+
+        (target_dt - now).num_seconds().max(1) as u64
+    }
 }
 
 fn main() -> Result<(), slint::PlatformError> {
@@ -51,8 +78,9 @@ fn main() -> Result<(), slint::PlatformError> {
     {
         let state = Arc::clone(&state);
         let window_handle = window_handle.clone();
-        main_window.on_add_item(move |total, action_str, prompt, label, grace, post_wake, target_win, require_fg| {
-            if total <= 0 {
+        main_window.on_add_item(move |mode, h, m, s, action_str, prompt, label, sleep_mode, grace_h, grace_m, grace_s, post_wake, target_win, require_fg| {
+            let total = compute_seconds(mode, h, m, s);
+            if total == 0 {
                 return;
             }
 
@@ -76,12 +104,14 @@ fn main() -> Result<(), slint::PlatformError> {
                 };
             }
 
-            let mut item = Item::new(total as u64, action);
+            let grace_total = compute_seconds(sleep_mode, grace_h, grace_m, grace_s);
+
+            let mut item = Item::new(total, action);
             item.prompt = prompt.to_string();
             item.label = display_label;
             item.sleep_cfg = SleepConfig {
-                pre_sleep_grace: grace as u64,
-                post_wake_delay: post_wake as u64,
+                pre_sleep_grace: grace_total,
+                post_wake_delay: post_wake.max(0) as u64,
             };
 
             let win_str = target_win.to_string();
@@ -103,12 +133,11 @@ fn main() -> Result<(), slint::PlatformError> {
     {
         let state = Arc::clone(&state);
         let window_handle = window_handle.clone();
-        main_window.on_add_preset(move |preset_type, total| {
-            if total <= 0 {
+        main_window.on_add_preset(move |preset_type, mode, h, m, s| {
+            let duration = compute_seconds(mode, h, m, s);
+            if duration == 0 {
                 return;
             }
-
-            let duration = total as u64;
 
             let mut s = state.lock().unwrap();
             match preset_type.as_str() {
@@ -125,6 +154,10 @@ fn main() -> Result<(), slint::PlatformError> {
 
                     let mut sleep_item = Item::new(duration, ActionType::Sleep);
                     sleep_item.label = t("default_sleep_label").to_string();
+                    sleep_item.sleep_cfg = SleepConfig {
+                        pre_sleep_grace: 5,
+                        post_wake_delay: 30,
+                    };
 
                     let post_action = if preset_type.as_str() == "enter" {
                         ActionType::Enter
@@ -147,6 +180,153 @@ fn main() -> Result<(), slint::PlatformError> {
 
             if let Some(app) = window_handle.upgrade() {
                 sync_queue_to_ui(&app, &s.queue);
+            }
+        });
+    }
+
+    // Set Time Preset
+    {
+        let window_handle = window_handle.clone();
+        main_window.on_set_time_preset(move |amount, unit, mode| {
+            if let Some(app) = window_handle.upgrade() {
+                if mode == 0 {
+                    // Timer Mode
+                    app.set_input_h("0".into());
+                    app.set_input_m("0".into());
+                    app.set_input_s("0".into());
+                    if unit.as_str() == "h" {
+                        app.set_input_h(amount.to_string().into());
+                    } else if unit.as_str() == "m" {
+                        app.set_input_m(amount.to_string().into());
+                    } else {
+                        app.set_input_s(amount.to_string().into());
+                    }
+                } else {
+                    // Clock Mode
+                    let now = Local::now();
+                    let target = if unit.as_str() == "init_clock" {
+                        now
+                    } else if unit.as_str() == "h" {
+                        now + chrono::Duration::hours(amount as i64)
+                    } else if unit.as_str() == "m" {
+                        now + chrono::Duration::minutes(amount as i64)
+                    } else {
+                        now + chrono::Duration::seconds(amount as i64)
+                    };
+
+                    app.set_input_h(target.hour().to_string().into());
+                    app.set_input_m(target.minute().to_string().into());
+                    app.set_input_s(target.second().to_string().into());
+
+                    let delta_secs = if target > now {
+                        (target - now).num_seconds()
+                    } else {
+                        ((target + chrono::Duration::days(1)) - now).num_seconds()
+                    };
+
+                    app.set_clock_preview_text(crate::i18n::format_clock_preview(
+                        delta_secs as u64,
+                        &format!("{:02}:{:02}:{:02}", target.hour(), target.minute(), target.second())
+                    ).into());
+                }
+            }
+        });
+    }
+
+    // Set Sleep Time Preset
+    {
+        let window_handle = window_handle.clone();
+        main_window.on_set_sleep_time_preset(move |amount, unit, sleep_mode| {
+            if let Some(app) = window_handle.upgrade() {
+                if sleep_mode == 0 {
+                    // Timer Mode
+                    app.set_input_grace_h("0".into());
+                    app.set_input_grace_m("0".into());
+                    app.set_input_grace_s("0".into());
+                    if unit.as_str() == "h" {
+                        app.set_input_grace_h(amount.to_string().into());
+                    } else if unit.as_str() == "m" {
+                        app.set_input_grace_m(amount.to_string().into());
+                    } else {
+                        app.set_input_grace_s(amount.to_string().into());
+                    }
+                } else {
+                    // Clock Mode
+                    let now = Local::now();
+                    let target = if unit.as_str() == "init_clock" {
+                        now
+                    } else if unit.as_str() == "h" {
+                        now + chrono::Duration::hours(amount as i64)
+                    } else if unit.as_str() == "m" {
+                        now + chrono::Duration::minutes(amount as i64)
+                    } else {
+                        now + chrono::Duration::seconds(amount as i64)
+                    };
+
+                    app.set_input_grace_h(target.hour().to_string().into());
+                    app.set_input_grace_m(target.minute().to_string().into());
+                    app.set_input_grace_s(target.second().to_string().into());
+
+                    let delta_secs = if target > now {
+                        (target - now).num_seconds()
+                    } else {
+                        ((target + chrono::Duration::days(1)) - now).num_seconds()
+                    };
+
+                    app.set_sleep_clock_preview_text(crate::i18n::format_clock_preview(
+                        delta_secs as u64,
+                        &format!("{:02}:{:02}:{:02}", target.hour(), target.minute(), target.second())
+                    ).into());
+                }
+            }
+        });
+    }
+
+    // Periodic Clock Preview Update Timer
+    let clock_timer = slint::Timer::default();
+    {
+        let window_handle = window_handle.clone();
+        clock_timer.start(slint::TimerMode::Repeated, Duration::from_secs(1), move || {
+            if let Some(app) = window_handle.upgrade() {
+                let now = Local::now();
+
+                // Main timer clock preview
+                if app.get_mode_type() == 1 {
+                    let h: u32 = app.get_input_h().parse().unwrap_or(0);
+                    let m: u32 = app.get_input_m().parse().unwrap_or(0);
+                    let s: u32 = app.get_input_s().parse().unwrap_or(0);
+
+                    let target_time = chrono::NaiveTime::from_hms_opt(h.clamp(0, 23), m.clamp(0, 59), s.clamp(0, 59)).unwrap_or_else(|| now.time());
+                    let mut target_dt = now.date_naive().and_time(target_time).and_local_timezone(Local).single().unwrap_or(now);
+                    if target_dt <= now {
+                        target_dt = target_dt + chrono::Duration::days(1);
+                    }
+                    let delta_secs = (target_dt - now).num_seconds().max(1);
+
+                    app.set_clock_preview_text(crate::i18n::format_clock_preview(
+                        delta_secs as u64,
+                        &format!("{:02}:{:02}:{:02}", h, m, s)
+                    ).into());
+                }
+
+                // Sleep grace clock preview
+                if app.get_sleep_mode_type() == 1 {
+                    let gh: u32 = app.get_input_grace_h().parse().unwrap_or(0);
+                    let gm: u32 = app.get_input_grace_m().parse().unwrap_or(0);
+                    let gs: u32 = app.get_input_grace_s().parse().unwrap_or(0);
+
+                    let target_time = chrono::NaiveTime::from_hms_opt(gh.clamp(0, 23), gm.clamp(0, 59), gs.clamp(0, 59)).unwrap_or_else(|| now.time());
+                    let mut target_dt = now.date_naive().and_time(target_time).and_local_timezone(Local).single().unwrap_or(now);
+                    if target_dt <= now {
+                        target_dt = target_dt + chrono::Duration::days(1);
+                    }
+                    let delta_secs = (target_dt - now).num_seconds().max(1);
+
+                    app.set_sleep_clock_preview_text(crate::i18n::format_clock_preview(
+                        delta_secs as u64,
+                        &format!("{:02}:{:02}:{:02}", gh, gm, gs)
+                    ).into());
+                }
             }
         });
     }
@@ -192,6 +372,47 @@ fn main() -> Result<(), slint::PlatformError> {
             let state_ref = Arc::clone(&state);
 
             executor.lock().unwrap().start(q_clone, None, move |event| {
+                let handle = handle.clone();
+                let state_ref = Arc::clone(&state_ref);
+
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(app) = handle.upgrade() {
+                        handle_executor_event(&app, &state_ref, event);
+                    }
+                });
+            });
+        });
+    }
+
+    // Start Later
+    {
+        let state = Arc::clone(&state);
+        let executor = Arc::clone(&executor);
+        let window_handle = window_handle.clone();
+
+        main_window.on_start_later(move |delay_minutes| {
+            let q_clone = {
+                let s = state.lock().unwrap();
+                s.queue.clone()
+            };
+
+            if q_clone.is_empty() || delay_minutes <= 0 {
+                return;
+            }
+
+            let start_at = Local::now() + chrono::Duration::minutes(delay_minutes as i64);
+
+            if let Some(app) = window_handle.upgrade() {
+                app.set_is_running(true);
+                app.set_status_text(format!("Geplant für {}", start_at.format("%H:%M:%S")).into());
+            }
+
+            let handle = window_handle.clone();
+            let state_ref = Arc::clone(&state);
+
+            append_log(&window_handle, &state, &format!("Warteschlange geplant für {} (+{}m)", start_at.format("%H:%M:%S"), delay_minutes));
+
+            executor.lock().unwrap().start(q_clone, Some(start_at), move |event| {
                 let handle = handle.clone();
                 let state_ref = Arc::clone(&state_ref);
 
