@@ -46,11 +46,43 @@ AutoClick Timer is a high-performance Windows desktop automation utility written
 
 AutoClick Timer embeds a complete MCP `stdio` server directly into the binary. AI agents can use all desktop automation features through structured JSON tool calls without shell escaping issues.
 
-### Starting the MCP Server
+### Starting the MCP Server (stdio -- for AI agents)
 
 ```powershell
 act mcp
 ```
+
+### Starting the MCP Server (TCP -- for mobile remote control over Tailscale)
+
+```powershell
+act mcp --tcp-port 7890
+act mcp --tcp-port 7890 --api-key mysecret
+```
+
+When `--tcp-port` is provided the binary listens on `0.0.0.0:<port>` **in addition** to the stdio transport, accepting multiple concurrent clients. Each client speaks the same MCP JSON-RPC 2.0 protocol over a newline-delimited TCP stream.
+
+**Authentication (optional but recommended):** If `--api-key` is set, every TCP client must send an `auth` message as its very first request:
+
+```json
+{"jsonrpc":"2.0","id":1,"method":"auth","params":{"key":"mysecret"}}
+```
+
+The server replies `{"result":{"authenticated":true}}` on success, or disconnects on failure. Tailscale's VPN already provides network-layer security -- the API key is an extra guard.
+
+### Tailscale Remote Control (Android / iOS)
+
+The companion **AutoClick Remote** Flutter app (`mobile/`) connects to the TCP MCP server over your Tailscale network and exposes full GUI parity on your phone:
+
+- **Status screen** -- live queue progress, remaining time, cancel button
+- **Quick Actions** -- one-tap click, enter, sleep, shutdown, type, caffeine toggle
+- **Queue Builder** -- drag-to-reorder multi-step queues with repeat looping
+- **Settings** -- cursor position, passwordless wake config, disconnect
+
+**Setup:**
+1. Run `act mcp --tcp-port 7890 --api-key <secret>` on your PC
+2. Make sure both devices are on the same Tailscale network
+3. Open AutoClick Remote, enter your PC's Tailscale IP, port `7890`, and API key
+4. Tap Connect
 
 ### MCP Configuration Example (Claude Desktop / Cursor / Antigravity)
 

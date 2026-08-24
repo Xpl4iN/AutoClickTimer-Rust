@@ -96,8 +96,19 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Start Model Context Protocol (MCP) server over stdio for AI agents
-    Mcp,
+    /// Start Model Context Protocol (MCP) server over stdio for AI agents.
+    /// Optionally also listen on a TCP port for remote clients (e.g. mobile app over Tailscale).
+    Mcp {
+        /// Also listen for MCP JSON-RPC connections on this TCP port (e.g. 7890).
+        /// Clients must connect over Tailscale for security.
+        #[arg(long, value_name = "PORT")]
+        tcp_port: Option<u16>,
+
+        /// Shared API key required from TCP clients before tool calls are accepted.
+        /// If omitted, no key is required (rely solely on Tailscale ACLs).
+        #[arg(long, value_name = "SECRET")]
+        api_key: Option<String>,
+    },
 
     /// Configure current user session to wake from sleep without password lockscreen
     #[command(name = "configure-wake-lock")]
@@ -291,17 +302,13 @@ impl From<CliAction> for ActionType {
 // ---------------------------------------------------------------------------
 
 pub fn run_cli() -> ! {
-    let is_mcp = std::env::args().any(|a| a == "mcp");
-    if !is_mcp {
-        attach_console();
-    }
-
+    attach_console();
     let cli = Cli::parse();
 
     match cli.command {
         // ------------------------------------------------------------------
-        Commands::Mcp => {
-            crate::mcp::run_mcp_server();
+        Commands::Mcp { tcp_port, api_key } => {
+            crate::mcp::run_mcp_server(tcp_port, api_key);
         }
 
         // ------------------------------------------------------------------

@@ -1,6 +1,6 @@
 [package]
 name = "autoclicktimer"
-version = "1.4.2"
+version = "1.5.0"
 edition = "2021"
 authors = ["Xpl4iN"]
 description = "AutoClick Timer -- Native Windows Automation Utility"
@@ -28,6 +28,7 @@ chrono = "0.4"
 arboard = "3.4"
 rfd = "0.15"
 ureq = { version = "2.10", features = ["json", "tls"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "sync", "macros"] }
 
 [build-dependencies]
 slint-build = "1.9"

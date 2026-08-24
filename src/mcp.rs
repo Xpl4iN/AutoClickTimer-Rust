@@ -1,7 +1,11 @@
 //! Model Context Protocol (MCP) Server for AutoClickTimer.
 //!
-//! Exposes complete GUI automation parity over standard MCP JSON-RPC 2.0 (stdio).
+//! Exposes complete GUI automation parity over standard MCP JSON-RPC 2.0.
 //! Specification version: 2024-11-05.
+//!
+//! Transports:
+//!   - stdio  (for AI agents: Claude Desktop, Cursor, Antigravity, etc.)
+//!   - TCP    (for mobile remote control over Tailscale; opt-in via --tcp-port)
 //!
 //! Tools exposed:
 //!   - `act_execute_action`: Run a single immediate or delayed action
@@ -30,6 +34,9 @@ use crate::platform::windows::power::{configure_passwordless_wake, set_caffeine}
 use crate::updater::CURRENT_VERSION;
 
 const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
+/// First line that TCP clients must send for authentication (if an api_key is configured).
+/// Format: `{"jsonrpc":"2.0","method":"auth","params":{"key":"<secret>"}}`
+const TCP_AUTH_METHOD: &str = "auth";
 
 #[derive(Debug, Serialize, Deserialize)]
 struct JsonRpcRequest {
@@ -605,9 +612,221 @@ fn send_response(stdout: &mut io::Stdout, resp: &JsonRpcResponse) {
     }
 }
 
-pub fn run_mcp_server() -> ! {
-    let server = McpServer::new();
-    server.run()
+/// Launch the MCP server.
+///
+/// - Always starts the stdio loop (for AI agent tool-call integration).
+/// - If `tcp_port` is `Some(port)`, also spins up a Tokio-based TCP listener on
+///   `0.0.0.0:<port>` that accepts multiple concurrent clients, each in its own task.
+/// - If `api_key` is `Some(secret)`, every TCP connection must send an `auth` message
+///   as its very first JSON-RPC request before tool calls are accepted.
+pub fn run_mcp_server(tcp_port: Option<u16>, api_key: Option<String>) -> ! {
+    let server = Arc::new(McpServer::new());
+
+    if let Some(port) = tcp_port {
+        let server_stdio = Arc::clone(&server);
+        // Spawn a background thread for the stdio loop if stdin is piped (e.g. AI agent)
+        std::thread::spawn(move || {
+            let stdin = io::stdin();
+            let mut stdout = io::stdout();
+            for line in stdin.lock().lines() {
+                let line = match line {
+                    Ok(l) => l,
+                    Err(_) => break,
+                };
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                let request: JsonRpcRequest = match serde_json::from_str(trimmed) {
+                    Ok(req) => req,
+                    Err(e) => {
+                        let err_resp = JsonRpcResponse {
+                            jsonrpc: "2.0".to_string(),
+                            id: None,
+                            result: None,
+                            error: Some(JsonRpcError {
+                                code: -32700,
+                                message: format!("Parse error: {}", e),
+                                data: None,
+                            }),
+                        };
+                        send_response(&mut stdout, &err_resp);
+                        continue;
+                    }
+                };
+                if let Some(resp) = server_stdio.handle_request(request) {
+                    send_response(&mut stdout, &resp);
+                }
+            }
+        });
+
+        println!("[MCP-TCP] AutoClickTimer TCP Server listening on 0.0.0.0:{}", port);
+        if api_key.is_some() {
+            println!("[MCP-TCP] API key authentication is enabled.");
+        }
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("[MCP-TCP] Failed to build Tokio runtime");
+        rt.block_on(run_tcp_listener(server, port, api_key));
+        std::process::exit(0);
+    } else {
+        // Run stdio loop on the main thread (blocks forever)
+        server.run()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Async TCP listener
+// ---------------------------------------------------------------------------
+
+async fn run_tcp_listener(server: Arc<McpServer>, port: u16, api_key: Option<String>) {
+    use tokio::net::TcpListener;
+    let addr = format!("0.0.0.0:{}", port);
+    let listener = match TcpListener::bind(&addr).await {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("[MCP-TCP] Failed to bind {}: {}", addr, e);
+            return;
+        }
+    };
+
+    loop {
+        match listener.accept().await {
+            Ok((stream, peer)) => {
+                eprintln!("[MCP-TCP] Client connected: {}", peer);
+                let srv = Arc::clone(&server);
+                let key = api_key.clone();
+                tokio::spawn(handle_tcp_client(srv, stream, peer.to_string(), key));
+            }
+            Err(e) => {
+                eprintln!("[MCP-TCP] Accept error: {}", e);
+            }
+        }
+    }
+}
+
+async fn handle_tcp_client(
+    server: Arc<McpServer>,
+    stream: tokio::net::TcpStream,
+    peer: String,
+    api_key: Option<String>,
+) {
+    use tokio::io::{AsyncBufReadExt, BufReader};
+
+    let (read_half, mut write_half) = stream.into_split();
+    let mut reader = BufReader::new(read_half);
+    let mut line = String::new();
+    let mut authenticated = api_key.is_none(); // no key required = pre-authenticated
+
+    loop {
+        line.clear();
+        match reader.read_line(&mut line).await {
+            Ok(0) => {
+                eprintln!("[MCP-TCP] Client disconnected: {}", peer);
+                break;
+            }
+            Err(e) => {
+                eprintln!("[MCP-TCP] Read error ({}): {}", peer, e);
+                break;
+            }
+            Ok(_) => {}
+        }
+
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        // Parse incoming request
+        let request: JsonRpcRequest = match serde_json::from_str(trimmed) {
+            Ok(r) => r,
+            Err(e) => {
+                let err_resp = JsonRpcResponse {
+                    jsonrpc: "2.0".to_string(),
+                    id: None,
+                    result: None,
+                    error: Some(JsonRpcError {
+                        code: -32700,
+                        message: format!("Parse error: {}", e),
+                        data: None,
+                    }),
+                };
+                send_tcp_response(&mut write_half, &err_resp).await;
+                continue;
+            }
+        };
+
+        // Handle auth handshake
+        if !authenticated {
+            if request.method == TCP_AUTH_METHOD {
+                let provided = request
+                    .params
+                    .as_ref()
+                    .and_then(|p| p.get("key"))
+                    .and_then(|k| k.as_str())
+                    .unwrap_or("");
+                if Some(provided) == api_key.as_deref() {
+                    authenticated = true;
+                    let ok = JsonRpcResponse {
+                        jsonrpc: "2.0".to_string(),
+                        id: request.id,
+                        result: Some(json!({ "authenticated": true })),
+                        error: None,
+                    };
+                    send_tcp_response(&mut write_half, &ok).await;
+                } else {
+                    let deny = JsonRpcResponse {
+                        jsonrpc: "2.0".to_string(),
+                        id: request.id,
+                        result: None,
+                        error: Some(JsonRpcError {
+                            code: -32001,
+                            message: "Unauthorized: invalid or missing API key.".to_string(),
+                            data: None,
+                        }),
+                    };
+                    send_tcp_response(&mut write_half, &deny).await;
+                    // Disconnect immediately after failed auth
+                    eprintln!("[MCP-TCP] Auth failed from {}, disconnecting.", peer);
+                    break;
+                }
+                continue;
+            } else {
+                // Client tried to call a method before authenticating
+                let deny = JsonRpcResponse {
+                    jsonrpc: "2.0".to_string(),
+                    id: request.id,
+                    result: None,
+                    error: Some(JsonRpcError {
+                        code: -32001,
+                        message: "Unauthorized: send auth message first.".to_string(),
+                        data: None,
+                    }),
+                };
+                send_tcp_response(&mut write_half, &deny).await;
+                continue;
+            }
+        }
+
+        // Dispatch via the shared handle_request logic
+        if let Some(resp) = server.handle_request(request) {
+            send_tcp_response(&mut write_half, &resp).await;
+        }
+    }
+}
+
+async fn send_tcp_response(
+    writer: &mut tokio::net::tcp::OwnedWriteHalf,
+    resp: &JsonRpcResponse,
+) {
+    use tokio::io::AsyncWriteExt;
+    if let Ok(json_str) = serde_json::to_string(resp) {
+        let line = format!("{}
+", json_str);
+        let _ = writer.write_all(line.as_bytes()).await;
+    }
 }
 
 fn parse_seconds_from_value(val: &Value) -> Result<u64, String> {

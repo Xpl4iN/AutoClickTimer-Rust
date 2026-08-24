@@ -1,4 +1,28 @@
+# Rust
 /target
 **/*.rs.bk
 *.new
 *.bat
+
+# Flutter & Dart
+mobile/build/
+mobile/.dart_tool/
+mobile/.flutter-plugins
+mobile/.flutter-plugins-dependencies
+mobile/.packages
+mobile/.pub-cache/
+mobile/.pub/
+mobile/android/local.properties
+mobile/android/.gradle/
+mobile/android/app/build/
+mobile/android/captures/
+mobile/android/.cxx/
+
+# IDE & Editor files
+.idea/
+*.iml
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
