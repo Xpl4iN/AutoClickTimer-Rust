@@ -22,7 +22,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 #[link(name = "user32")]
-extern "system" {
+unsafe extern "system" {
     fn OpenInputDesktop(dwFlags: u32, fInherit: BOOL, dwDesiredAccess: u32) -> windows::Win32::Foundation::HANDLE;
     fn SetThreadDesktop(hDesktop: windows::Win32::Foundation::HANDLE) -> BOOL;
     fn CloseDesktop(hDesktop: windows::Win32::Foundation::HANDLE) -> BOOL;
@@ -387,21 +387,23 @@ pub fn find_window_by_title(title: &str) -> Option<HWND> {
 }
 
 unsafe extern "system" fn enum_find_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
-    let tuple = &mut *(lparam.0 as *mut (&String, &mut Option<HWND>));
-    let (target, out) = tuple;
+    unsafe {
+        let tuple = &mut *(lparam.0 as *mut (&String, &mut Option<HWND>));
+        let (target, out) = tuple;
 
-    if IsWindowVisible(hwnd).as_bool() {
-        let len = GetWindowTextLengthW(hwnd);
-        if len > 0 {
-            let mut buf = vec![0u16; (len + 1) as usize];
-            let read = GetWindowTextW(hwnd, &mut buf);
-            if read > 0 {
-                let text = OsString::from_wide(&buf[..read as usize])
-                    .to_string_lossy()
-                    .to_lowercase();
-                if text.contains(target.as_str()) {
-                    **out = Some(hwnd);
-                    return BOOL(0); // stop enumeration
+        if IsWindowVisible(hwnd).as_bool() {
+            let len = GetWindowTextLengthW(hwnd);
+            if len > 0 {
+                let mut buf = vec![0u16; (len + 1) as usize];
+                let read = GetWindowTextW(hwnd, &mut buf);
+                if read > 0 {
+                    let text = OsString::from_wide(&buf[..read as usize])
+                        .to_string_lossy()
+                        .to_lowercase();
+                    if text.contains(target.as_str()) {
+                        **out = Some(hwnd);
+                        return BOOL(0); // stop enumeration
+                    }
                 }
             }
         }
@@ -513,19 +515,21 @@ pub fn get_open_windows() -> Vec<String> {
 }
 
 unsafe extern "system" fn enum_windows_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
-    let titles = &mut *(lparam.0 as *mut Vec<String>);
+    unsafe {
+        let titles = &mut *(lparam.0 as *mut Vec<String>);
 
-    if IsWindowVisible(hwnd).as_bool() {
-        let len = GetWindowTextLengthW(hwnd);
-        if len > 0 {
-            let mut buf = vec![0u16; (len + 1) as usize];
-            let read = GetWindowTextW(hwnd, &mut buf);
-            if read > 0 {
-                let title = OsString::from_wide(&buf[..read as usize])
-                    .to_string_lossy()
-                    .to_string();
-                if !title.is_empty() && !titles.contains(&title) {
-                    titles.push(title);
+        if IsWindowVisible(hwnd).as_bool() {
+            let len = GetWindowTextLengthW(hwnd);
+            if len > 0 {
+                let mut buf = vec![0u16; (len + 1) as usize];
+                let read = GetWindowTextW(hwnd, &mut buf);
+                if read > 0 {
+                    let title = OsString::from_wide(&buf[..read as usize])
+                        .to_string_lossy()
+                        .to_string();
+                    if !title.is_empty() && !titles.contains(&title) {
+                        titles.push(title);
+                    }
                 }
             }
         }

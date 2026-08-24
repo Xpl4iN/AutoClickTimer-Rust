@@ -4,6 +4,8 @@ import 'package:provider/provider.dart';
 
 import '../services/mcp_service.dart';
 
+import '../services/update_service.dart';
+
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({super.key});
   @override
@@ -12,6 +14,170 @@ class SettingsScreen extends StatefulWidget {
 
 class _SettingsScreenState extends State<SettingsScreen> {
   bool _configLoading = false;
+  bool _updateChecking = false;
+
+  Future<void> _checkForUpdate() async {
+    HapticFeedback.lightImpact();
+    setState(() => _updateChecking = true);
+    try {
+      final info = await UpdateService.checkForUpdate();
+      if (!mounted) return;
+
+      if (info == null) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: const Row(
+              children: [
+                Icon(Icons.check_circle, color: Colors.white, size: 18),
+                SizedBox(width: 8),
+                Text('You are running the latest version (v${UpdateService.currentVersion})', style: TextStyle(fontWeight: FontWeight.w600)),
+              ],
+            ),
+            backgroundColor: const Color(0xFF10B981),
+            behavior: SnackBarBehavior.floating,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+          ),
+        );
+      } else {
+        _showUpdateDialog(info);
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Update check failed: $e'), backgroundColor: const Color(0xFFEF4444)),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _updateChecking = false);
+    }
+  }
+
+  void _showUpdateDialog(UpdateInfo info) {
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDialogState) {
+          double? progress;
+          bool downloading = false;
+          String? downloadError;
+
+          return AlertDialog(
+            backgroundColor: const Color(0xFF14151E),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(16),
+              side: const BorderSide(color: Color(0xFF242838)),
+            ),
+            title: Row(
+              children: [
+                Container(
+                  padding: const EdgeInsets.all(8),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF10B981).withValues(alpha: 0.15),
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  child: const Icon(Icons.system_update, color: Color(0xFF10B981), size: 22),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Text(
+                    'Update Available (v${info.version})',
+                    style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
+                  ),
+                ),
+              ],
+            ),
+            content: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'Current version: v${UpdateService.currentVersion}\nLatest version: v${info.version}',
+                    style: const TextStyle(fontSize: 12.5, color: Color(0xFF94A3B8)),
+                  ),
+                  const SizedBox(height: 12),
+                  if (info.releaseNotes.isNotEmpty) ...[
+                    const Text('What\'s New:', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: Color(0xFFE2E8F0))),
+                    const SizedBox(height: 4),
+                    Container(
+                      padding: const EdgeInsets.all(10),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF0F1017),
+                        borderRadius: BorderRadius.circular(8),
+                        border: Border.all(color: const Color(0xFF242838)),
+                      ),
+                      child: Text(
+                        info.releaseNotes,
+                        maxLines: 6,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(fontSize: 11, color: Color(0xFFCBD5E1)),
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                  ],
+                  if (downloading) ...[
+                    LinearProgressIndicator(
+                      value: progress,
+                      backgroundColor: const Color(0xFF242838),
+                      color: const Color(0xFF10B981),
+                    ),
+                    const SizedBox(height: 8),
+                    Center(
+                      child: Text(
+                        progress != null ? '${(progress! * 100).toStringAsFixed(0)}% Downloading...' : 'Starting download...',
+                        style: const TextStyle(fontSize: 11, color: Color(0xFF94A3B8)),
+                      ),
+                    ),
+                  ],
+                  if (downloadError != null)
+                    Text('Error: $downloadError', style: const TextStyle(color: Color(0xFFEF4444), fontSize: 11.5)),
+                ],
+              ),
+            ),
+            actions: [
+              if (!downloading)
+                TextButton(
+                  onPressed: () => Navigator.of(ctx).pop(),
+                  child: const Text('Later', style: TextStyle(color: Color(0xFF6B7280))),
+                ),
+              ElevatedButton(
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: const Color(0xFF10B981),
+                  foregroundColor: Colors.white,
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                ),
+                onPressed: downloading
+                    ? null
+                    : () async {
+                        setDialogState(() {
+                          downloading = true;
+                          progress = 0;
+                          downloadError = null;
+                        });
+                        try {
+                          await UpdateService.downloadAndInstall(
+                            info.downloadUrl,
+                            onProgress: (p) {
+                              setDialogState(() => progress = p);
+                            },
+                          );
+                          if (ctx.mounted) Navigator.of(ctx).pop();
+                        } catch (e) {
+                          setDialogState(() {
+                            downloading = false;
+                            downloadError = e.toString();
+                          });
+                        }
+                      },
+                child: Text(downloading ? 'Downloading...' : 'Install Update'),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+  }
 
   Future<void> _disconnect() async {
     HapticFeedback.mediumImpact();
@@ -248,6 +414,44 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   onTap: _showCursorPos,
                 ),
               ],
+            ),
+          ),
+          const SizedBox(height: 20),
+
+          // Updates
+          const Text(
+            'APPLICATION UPDATES',
+            style: TextStyle(
+              fontSize: 11,
+              fontWeight: FontWeight.w700,
+              letterSpacing: 0.8,
+              color: Color(0xFF6B7280),
+            ),
+          ),
+          const SizedBox(height: 8),
+
+          Container(
+            decoration: BoxDecoration(
+              color: const Color(0xFF14151E),
+              borderRadius: BorderRadius.circular(14),
+              border: Border.all(color: const Color(0xFF242838)),
+            ),
+            child: ListTile(
+              dense: true,
+              leading: Container(
+                padding: const EdgeInsets.all(6),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF10B981).withValues(alpha: 0.12),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: const Icon(Icons.system_update, color: Color(0xFF10B981), size: 18),
+              ),
+              title: const Text('Check for App Updates', style: TextStyle(fontWeight: FontWeight.w600, fontSize: 13.5)),
+              subtitle: const Text('Current: v${UpdateService.currentVersion} • GitHub Releases', style: TextStyle(color: Color(0xFF8B92A5), fontSize: 11.5)),
+              trailing: _updateChecking
+                  ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: Color(0xFF10B981)))
+                  : const Icon(Icons.chevron_right, size: 18, color: Color(0xFF52586B)),
+              onTap: _updateChecking ? null : _checkForUpdate,
             ),
           ),
         ],

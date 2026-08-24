@@ -27,7 +27,7 @@ const POST_SUSPEND_WAIT: Duration = Duration::from_secs(5);
 const MIN_CONFIRM_BUFFER_SECS: u64 = 30;
 
 #[link(name = "Powrprof")]
-extern "system" {
+unsafe extern "system" {
     fn SetSuspendState(bHibernate: BOOLEAN, bForce: BOOLEAN, bWakeupEventsDisabled: BOOLEAN) -> BOOLEAN;
 }
 
