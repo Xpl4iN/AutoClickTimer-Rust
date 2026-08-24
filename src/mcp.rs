@@ -207,7 +207,64 @@ impl McpServer {
             "act_list_windows" => self.tool_list_windows(),
             "act_set_caffeine" => self.tool_set_caffeine(args),
             "act_configure_passwordless_wake" => self.tool_configure_passwordless_wake(),
+            "act_get_cursor_pos" => self.tool_get_cursor_pos(),
+            "act_get_window_rect" => self.tool_get_window_rect(args),
+            "act_reorder_queue" => self.tool_reorder_queue(args),
             _ => Err(format!("Unknown tool: '{}'", name)),
+        }
+    }
+
+    fn tool_get_cursor_pos(&self) -> Result<Value, String> {
+        let (x, y) = crate::platform::windows::input::get_cursor_pos();
+        Ok(json!({
+            "x": x,
+            "y": y
+        }))
+    }
+
+    fn tool_get_window_rect(&self, args: Value) -> Result<Value, String> {
+        let win = args.get("window").and_then(|v| v.as_str()).ok_or("Missing required parameter: 'window'")?;
+        match crate::platform::windows::input::get_window_rect_by_title(win) {
+            Some((x, y, w, h)) => Ok(json!({
+                "found": true,
+                "window": win,
+                "x": x,
+                "y": y,
+                "width": w,
+                "height": h
+            })),
+            None => Ok(json!({
+                "found": false,
+                "window": win,
+                "message": format!("No visible window matching '{}' was found.", win)
+            })),
+        }
+    }
+
+    fn tool_reorder_queue(&self, args: Value) -> Result<Value, String> {
+        let from = args.get("from_index").and_then(|v| v.as_u64()).ok_or("Missing required parameter: 'from_index'")? as usize;
+        let to = args.get("to_index").and_then(|v| v.as_u64()).ok_or("Missing required parameter: 'to_index'")? as usize;
+
+        if let Some(profile_str) = args.get("profile_path").and_then(|v| v.as_str()) {
+            let path = PathBuf::from(profile_str);
+            let content = std::fs::read_to_string(&path).map_err(|e| format!("Cannot read profile '{}': {}", path.display(), e))?;
+            let mut queue: Vec<Item> = serde_json::from_str(&content).map_err(|e| format!("Invalid profile format: {}", e))?;
+            crate::models::reorder_queue(&mut queue, from, to)?;
+            let json_str = serde_json::to_string_pretty(&queue).map_err(|e| format!("Failed to serialize profile: {}", e))?;
+            std::fs::write(&path, json_str).map_err(|e| format!("Failed to write profile to '{}': {}", path.display(), e))?;
+            Ok(json!({
+                "status": "reordered",
+                "profile_path": path.display().to_string(),
+                "from_index": from,
+                "to_index": to,
+                "item_count": queue.len()
+            }))
+        } else {
+            Ok(json!({
+                "status": "validated",
+                "from_index": from,
+                "to_index": to
+            }))
         }
     }
 
@@ -248,13 +305,15 @@ impl McpServer {
             post_wake_delay: post_wake,
         };
 
+        let repeat = args.get("repeat_count").and_then(|v| v.as_u64()).unwrap_or(1) as u32;
+
         let start_in = args.get("start_in").and_then(|v| v.as_str());
         let start_at = args.get("start_at").and_then(|v| v.as_str());
         let scheduled_start = resolve_start_time(start_in, start_at)?;
 
         let async_exec = args.get("async_execution").and_then(|v| v.as_bool()).unwrap_or(true);
 
-        self.start_queue(vec![item], scheduled_start, async_exec)
+        self.start_queue(vec![item], scheduled_start, repeat, async_exec)
     }
 
     fn tool_schedule_queue(&self, args: Value) -> Result<Value, String> {
@@ -309,13 +368,15 @@ impl McpServer {
             std::fs::write(&path, json_str).map_err(|e| format!("Failed to write profile to '{}': {}", path.display(), e))?;
         }
 
+        let repeat = args.get("repeat_count").and_then(|v| v.as_u64()).unwrap_or(1) as u32;
+
         let start_in = args.get("start_in").and_then(|v| v.as_str());
         let start_at = args.get("start_at").and_then(|v| v.as_str());
         let scheduled_start = resolve_start_time(start_in, start_at)?;
 
         let async_exec = args.get("async_execution").and_then(|v| v.as_bool()).unwrap_or(true);
 
-        self.start_queue(queue, scheduled_start, async_exec)
+        self.start_queue(queue, scheduled_start, repeat, async_exec)
     }
 
     fn tool_run_profile(&self, args: Value) -> Result<Value, String> {
@@ -327,13 +388,15 @@ impl McpServer {
             return Err("Profile contains no items.".to_string());
         }
 
+        let repeat = args.get("repeat_count").and_then(|v| v.as_u64()).unwrap_or(1) as u32;
+
         let start_in = args.get("start_in").and_then(|v| v.as_str());
         let start_at = args.get("start_at").and_then(|v| v.as_str());
         let scheduled_start = resolve_start_time(start_in, start_at)?;
 
         let async_exec = args.get("async_execution").and_then(|v| v.as_bool()).unwrap_or(true);
 
-        self.start_queue(queue, scheduled_start, async_exec)
+        self.start_queue(queue, scheduled_start, repeat, async_exec)
     }
 
     fn tool_save_profile(&self, args: Value) -> Result<Value, String> {
@@ -461,6 +524,7 @@ impl McpServer {
         &self,
         queue: Vec<Item>,
         start_at: Option<DateTime<Local>>,
+        repeat: u32,
         async_exec: bool,
     ) -> Result<Value, String> {
         let mut executor = self.executor.lock().unwrap();
@@ -472,7 +536,7 @@ impl McpServer {
         let item_count = queue.len();
         let total_duration_secs: u64 = queue.iter().map(|it| it.total).sum();
 
-        executor.start(queue, start_at, |_event| {
+        executor.start(queue, start_at, repeat, |_event| {
             // Background event sink
         });
 
@@ -670,6 +734,10 @@ fn get_tool_definitions() -> Vec<Value> {
                         "type": "integer",
                         "description": "Post-wake delay in seconds (sleep action only, default 30)."
                     },
+                    "repeat_count": {
+                        "type": "integer",
+                        "description": "Number of times to repeat the action (default: 1, 0 = infinite loop)."
+                    },
                     "start_in": {
                         "type": "string",
                         "description": "Optional delay before starting the countdown (e.g. '30m', '1h')."
@@ -717,6 +785,10 @@ fn get_tool_definitions() -> Vec<Value> {
                             "required": ["action", "after"]
                         }
                     },
+                    "repeat_count": {
+                        "type": "integer",
+                        "description": "Number of times to loop the entire queue (default: 1, 0 = infinite loop)."
+                    },
                     "save_profile_path": {
                         "type": "string",
                         "description": "Optional file path to save the queue as a .act JSON profile."
@@ -746,6 +818,10 @@ fn get_tool_definitions() -> Vec<Value> {
                     "profile_path": {
                         "type": "string",
                         "description": "Absolute or relative path to the .act JSON profile file."
+                    },
+                    "repeat_count": {
+                        "type": "integer",
+                        "description": "Number of times to loop the profile queue (default: 1, 0 = infinite loop)."
                     },
                     "start_in": { "type": "string" },
                     "start_at": { "type": "string" },
@@ -789,11 +865,55 @@ fn get_tool_definitions() -> Vec<Value> {
             }
         }),
         json!({
+            "name": "act_reorder_queue",
+            "description": "Reorder steps in a saved .act profile file or validate step move indices.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "from_index": {
+                        "type": "integer",
+                        "description": "Source index of the item to move (0-indexed)."
+                    },
+                    "to_index": {
+                        "type": "integer",
+                        "description": "Destination index to move the item to (0-indexed)."
+                    },
+                    "profile_path": {
+                        "type": "string",
+                        "description": "Optional file path to .act profile to modify in-place."
+                    }
+                },
+                "required": ["from_index", "to_index"]
+            }
+        }),
+        json!({
             "name": "act_get_status",
-            "description": "Query the current automation queue state, active step index, remaining countdown seconds, and phase in real time.",
+            "description": "Query the current automation queue state, active step index, iteration counters, remaining countdown seconds, and phase in real time.",
             "inputSchema": {
                 "type": "object",
                 "properties": {}
+            }
+        }),
+        json!({
+            "name": "act_get_cursor_pos",
+            "description": "Query current screen coordinates (X, Y) of the Windows mouse cursor.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {}
+            }
+        }),
+        json!({
+            "name": "act_get_window_rect",
+            "description": "Query the screen bounding box coordinates (X, Y, Width, Height) of a window matching title substring.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "window": {
+                        "type": "string",
+                        "description": "Window title substring to search for."
+                    }
+                },
+                "required": ["window"]
             }
         }),
         json!({
@@ -943,6 +1063,47 @@ mod tests {
         assert_eq!(result["isError"], true);
         let content_text = result["content"][0]["text"].as_str().unwrap();
         assert!(content_text.contains("Unknown tool"));
+    }
+
+    #[test]
+    fn test_mcp_get_cursor_pos() {
+        let server = McpServer::new();
+        let req = JsonRpcRequest {
+            jsonrpc: Some("2.0".to_string()),
+            id: Some(json!(6)),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "act_get_cursor_pos",
+                "arguments": {}
+            })),
+        };
+        let resp = server.handle_request(req).unwrap();
+        let result = resp.result.unwrap();
+        assert_eq!(result["isError"], false);
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("\"x\"") && text.contains("\"y\""));
+    }
+
+    #[test]
+    fn test_mcp_reorder_queue_validation() {
+        let server = McpServer::new();
+        let req = JsonRpcRequest {
+            jsonrpc: Some("2.0".to_string()),
+            id: Some(json!(7)),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "act_reorder_queue",
+                "arguments": {
+                    "from_index": 0,
+                    "to_index": 1
+                }
+            })),
+        };
+        let resp = server.handle_request(req).unwrap();
+        let result = resp.result.unwrap();
+        assert_eq!(result["isError"], false);
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("\"status\": \"validated\""));
     }
 }
 

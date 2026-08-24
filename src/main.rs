@@ -359,6 +359,22 @@ fn main() -> Result<(), slint::PlatformError> {
         });
     }
 
+    // Move / Reorder Item
+    {
+        let state = Arc::clone(&state);
+        let window_handle = window_handle.clone();
+        main_window.on_move_item(move |from_idx, to_idx| {
+            let from = from_idx as usize;
+            let to = to_idx as usize;
+            let mut s = state.lock().unwrap();
+            if crate::models::reorder_queue(&mut s.queue, from, to).is_ok() {
+                if let Some(app) = window_handle.upgrade() {
+                    sync_queue_to_ui(&app, &s.queue);
+                }
+            }
+        });
+    }
+
     // Remove Item
     {
         let state = Arc::clone(&state);
@@ -391,15 +407,22 @@ fn main() -> Result<(), slint::PlatformError> {
                 return;
             }
 
-            if let Some(app) = window_handle.upgrade() {
+            let repeat_count: u32 = if let Some(app) = window_handle.upgrade() {
                 app.set_is_running(true);
                 app.set_status_text(t("status_running").into());
-            }
+                if app.get_infinite_loop() {
+                    0
+                } else {
+                    app.get_repeat_input().parse().unwrap_or(1).max(1)
+                }
+            } else {
+                1
+            };
 
             let handle = window_handle.clone();
             let state_ref = Arc::clone(&state);
 
-            executor.lock().unwrap().start(q_clone, None, move |event| {
+            executor.lock().unwrap().start(q_clone, None, repeat_count, move |event| {
                 let handle = handle.clone();
                 let state_ref = Arc::clone(&state_ref);
 
@@ -430,17 +453,24 @@ fn main() -> Result<(), slint::PlatformError> {
 
             let start_at = Local::now() + chrono::Duration::minutes(delay_minutes as i64);
 
-            if let Some(app) = window_handle.upgrade() {
+            let repeat_count: u32 = if let Some(app) = window_handle.upgrade() {
                 app.set_is_running(true);
                 app.set_status_text(format!("Geplant für {}", start_at.format("%H:%M:%S")).into());
-            }
+                if app.get_infinite_loop() {
+                    0
+                } else {
+                    app.get_repeat_input().parse().unwrap_or(1).max(1)
+                }
+            } else {
+                1
+            };
 
             let handle = window_handle.clone();
             let state_ref = Arc::clone(&state);
 
             append_log(&window_handle, &state, &format!("Warteschlange geplant für {} (+{}m)", start_at.format("%H:%M:%S"), delay_minutes));
 
-            executor.lock().unwrap().start(q_clone, Some(start_at), move |event| {
+            executor.lock().unwrap().start(q_clone, Some(start_at), repeat_count, move |event| {
                 let handle = handle.clone();
                 let state_ref = Arc::clone(&state_ref);
 

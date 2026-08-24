@@ -181,6 +181,8 @@ pub struct QueueSnapshot {
     pub remaining_seconds: u64,
     pub phase: String,
     pub phase_total: u64,
+    pub current_iteration: u32,
+    pub total_iterations: u32, // 0 = infinite loop
     pub items: Vec<QueueItemSummary>,
 }
 
@@ -197,9 +199,27 @@ impl Default for QueueSnapshot {
             remaining_seconds: 0,
             phase: String::new(),
             phase_total: 0,
+            current_iteration: 0,
+            total_iterations: 1,
             items: Vec::new(),
         }
     }
+}
+
+/// Helper function to reorder items in a queue safely.
+pub fn reorder_queue(queue: &mut Vec<Item>, from: usize, to: usize) -> Result<(), String> {
+    if from >= queue.len() || to >= queue.len() {
+        return Err(format!(
+            "Index out of bounds: cannot move index {} to {} (queue length: {})",
+            from, to, queue.len()
+        ));
+    }
+    if from == to {
+        return Ok(());
+    }
+    let item = queue.remove(from);
+    queue.insert(to, item);
+    Ok(())
 }
 
 

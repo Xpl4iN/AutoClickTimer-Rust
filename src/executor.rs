@@ -78,6 +78,7 @@ impl QueueExecutor {
         &mut self,
         queue: Vec<Item>,
         start_at: Option<DateTime<Local>>,
+        repeat_count: u32,
         event_sink: F,
     ) where
         F: Fn(ExecutorEvent) + Send + Sync + 'static,
@@ -91,7 +92,7 @@ impl QueueExecutor {
         let snapshot = Arc::clone(&self.snapshot);
 
         let handle = thread::spawn(move || {
-            run_worker(queue, start_at, stop_flag, snapshot, event_sink);
+            run_worker(queue, start_at, repeat_count, stop_flag, snapshot, event_sink);
         });
 
         self.worker_handle = Some(handle);
@@ -109,6 +110,7 @@ impl QueueExecutor {
 fn run_worker<F>(
     mut queue: Vec<Item>,
     start_at: Option<DateTime<Local>>,
+    repeat_count: u32,
     stop_flag: Arc<AtomicBool>,
     snapshot: Arc<Mutex<QueueSnapshot>>,
     event_sink: F,
@@ -116,6 +118,8 @@ fn run_worker<F>(
     F: Fn(ExecutorEvent) + Send + Sync + 'static,
 {
     let total_items = queue.len();
+    let is_infinite = repeat_count == 0;
+    let max_iterations = if is_infinite { u32::MAX } else { repeat_count.max(1) };
 
     // Initialize snapshot
     {
@@ -137,6 +141,8 @@ fn run_worker<F>(
             snap.status = if start_at.is_some() { "scheduled".to_string() } else { "running".to_string() };
             snap.total_items = total_items;
             snap.current_index = 0;
+            snap.current_iteration = 1;
+            snap.total_iterations = repeat_count;
             snap.items = items_summary;
             if let Some(first) = queue.first() {
                 snap.current_action = first.action.as_str().to_string();
@@ -178,77 +184,124 @@ fn run_worker<F>(
         }
     }
 
-    for i in 0..total_items {
+    let mut iteration: u32 = 1;
+    loop {
         if stop_flag.load(Ordering::SeqCst) {
             break;
         }
 
-        let item = &mut queue[i];
-        item.status = ItemStatus::Running;
-
-        {
-            if let Ok(mut snap) = snapshot.lock() {
-                snap.current_index = i;
-                snap.current_action = item.action.as_str().to_string();
-                snap.current_label = item.label.clone();
-                snap.target_window = item.target_window.clone();
-                snap.remaining_seconds = item.total;
-                snap.phase = String::new();
-                snap.phase_total = item.total;
-                if i < snap.items.len() {
-                    snap.items[i].status = "running".to_string();
-                }
-            }
-        }
-
-        event_sink(ExecutorEvent::StepStart {
-            index: i,
-            total_items,
-            label: item.label.clone(),
-            duration_secs: item.total,
-        });
-
-        event_sink(ExecutorEvent::Log(format!(
-            "Schritt {}/{}: [{}] -- {}",
-            i + 1,
-            total_items,
-            item.label,
-            fmt_time(item.total)
-        )));
-
-        let completed = if item.action == ActionType::Sleep {
-            handle_sleep_step(i, item, &stop_flag, &snapshot, &event_sink)
-        } else if item.action == ActionType::Caffeine {
-            // Enable caffeine for the full duration, then disable
-            set_caffeine(true);
-            event_sink(ExecutorEvent::Log("  -> Caffeine aktiv: Bildschirm bleibt an.".to_string()));
-            let done = countdown(i, item.total, item.total, ItemPhase::None, &stop_flag, &snapshot, &event_sink);
-            set_caffeine(false);
-            event_sink(ExecutorEvent::Log("  -> Caffeine beendet.".to_string()));
-            done
-        } else {
-            let done = countdown(i, item.total, item.total, ItemPhase::None, &stop_flag, &snapshot, &event_sink);
-            if done {
-                dispatch_with_retry(item, &event_sink);
-            }
-            done
-        };
-
-        if !completed || stop_flag.load(Ordering::SeqCst) {
+        if !is_infinite && iteration > max_iterations {
             break;
         }
 
-        item.rem = 0;
-        item.status = ItemStatus::Done;
         {
             if let Ok(mut snap) = snapshot.lock() {
-                if i < snap.items.len() {
-                    snap.items[i].status = "done".to_string();
-                }
+                snap.current_iteration = iteration;
             }
         }
-        event_sink(ExecutorEvent::StepDone { index: i });
-        event_sink(ExecutorEvent::Log(format!("Schritt {} abgeschlossen.", i + 1)));
+
+        if max_iterations > 1 || is_infinite {
+            let iter_label = if is_infinite {
+                format!("--- Durchlauf {} (Endlosschleife) ---", iteration)
+            } else {
+                format!("--- Durchlauf {}/{} ---", iteration, max_iterations)
+            };
+            event_sink(ExecutorEvent::Log(iter_label));
+        }
+
+        let mut iteration_completed_cleanly = true;
+
+        for i in 0..total_items {
+            if stop_flag.load(Ordering::SeqCst) {
+                iteration_completed_cleanly = false;
+                break;
+            }
+
+            let item = &mut queue[i];
+            item.status = ItemStatus::Running;
+
+            {
+                if let Ok(mut snap) = snapshot.lock() {
+                    snap.current_index = i;
+                    snap.current_action = item.action.as_str().to_string();
+                    snap.current_label = item.label.clone();
+                    snap.target_window = item.target_window.clone();
+                    snap.remaining_seconds = item.total;
+                    snap.phase = String::new();
+                    snap.phase_total = item.total;
+                    if i < snap.items.len() {
+                        snap.items[i].status = "running".to_string();
+                    }
+                }
+            }
+
+            event_sink(ExecutorEvent::StepStart {
+                index: i,
+                total_items,
+                label: item.label.clone(),
+                duration_secs: item.total,
+            });
+
+            event_sink(ExecutorEvent::Log(format!(
+                "Schritt {}/{}: [{}] -- {}",
+                i + 1,
+                total_items,
+                item.label,
+                fmt_time(item.total)
+            )));
+
+            let completed = if item.action == ActionType::Sleep {
+                handle_sleep_step(i, item, &stop_flag, &snapshot, &event_sink)
+            } else if item.action == ActionType::Caffeine {
+                // Enable caffeine for the full duration, then disable
+                set_caffeine(true);
+                event_sink(ExecutorEvent::Log("  -> Caffeine aktiv: Bildschirm bleibt an.".to_string()));
+                let done = countdown(i, item.total, item.total, ItemPhase::None, &stop_flag, &snapshot, &event_sink);
+                set_caffeine(false);
+                event_sink(ExecutorEvent::Log("  -> Caffeine beendet.".to_string()));
+                done
+            } else {
+                let done = countdown(i, item.total, item.total, ItemPhase::None, &stop_flag, &snapshot, &event_sink);
+                if done {
+                    dispatch_with_retry(item, &event_sink);
+                }
+                done
+            };
+
+            if !completed || stop_flag.load(Ordering::SeqCst) {
+                iteration_completed_cleanly = false;
+                break;
+            }
+
+            item.rem = 0;
+            item.status = ItemStatus::Done;
+            {
+                if let Ok(mut snap) = snapshot.lock() {
+                    if i < snap.items.len() {
+                        snap.items[i].status = "done".to_string();
+                    }
+                }
+            }
+            event_sink(ExecutorEvent::StepDone { index: i });
+            event_sink(ExecutorEvent::Log(format!("Schritt {} abgeschlossen.", i + 1)));
+        }
+
+        if !iteration_completed_cleanly || stop_flag.load(Ordering::SeqCst) {
+            break;
+        }
+
+        iteration += 1;
+        if is_infinite || iteration <= max_iterations {
+            for item in queue.iter_mut() {
+                item.reset();
+            }
+            if let Ok(mut snap) = snapshot.lock() {
+                for it in snap.items.iter_mut() {
+                    it.status = "waiting".to_string();
+                }
+            }
+            thread::sleep(Duration::from_millis(150));
+        }
     }
 
     if stop_flag.load(Ordering::SeqCst) {
@@ -267,6 +320,7 @@ fn run_worker<F>(
         event_sink(ExecutorEvent::AllDone { total_items });
     }
 }
+
 
 fn handle_sleep_step<F>(
     index: usize,

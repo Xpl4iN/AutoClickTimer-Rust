@@ -22,10 +22,12 @@ AutoClick Timer is a high-performance Windows desktop automation utility written
 
 ## What's New in v1.4.0
 
-- **Native Model Context Protocol (MCP) Server:** Built-in `stdio` MCP server (`act mcp`) exposing 9 typed tools with 100% GUI parity for AI agents (Claude Desktop, Cursor, Antigravity, etc.).
+- **Native Model Context Protocol (MCP) Server:** Built-in `stdio` MCP server (`act mcp`) exposing 12 typed tools with 100% GUI parity for AI agents (Claude Desktop, Cursor, Antigravity, etc.).
+- **Multi-Iteration Looping:** Run queues $N$ times or loop infinitely ($\infty$) across GUI, CLI (`--repeat <N>`), and MCP (`repeat_count`).
+- **Visual & Programmatic Queue Reordering:** Move steps up and down in the GUI (`▲`/`▼`), reorder via CLI (`act reorder`), or reorder via MCP (`act_reorder_queue`).
+- **Screen & Window Inspection:** Query cursor coordinates and window bounding boxes across CLI (`act get-cursor`, `act get-window`) and MCP (`act_get_cursor_pos`, `act_get_window_rect`).
 - **Zero-Admin RTC Sleep & Wake:** Completely removed mandatory UAC elevation prompts for scheduled sleep/wake. Arms hardware RTC wake timers via Win32 user-mode APIs (`CreateWaitableTimerExW` with `fResume=true`).
 - **Password-Safe Windows Automation:** Support for background window-targeted message injection (`PostMessageW`/`SendMessageW`) while workstation is locked, plus zero-password wake configuration (`act configure-wake-lock`).
-- **Real-Time Asynchronous Queue Control:** Real-time state query (`act_get_status`) and cancellation (`act_cancel`) tools for headless agent orchestration.
 
 ## Action Types
 
@@ -67,11 +69,14 @@ act mcp
 
 | Tool | Description | Parameters |
 |---|---|---|
-| `act_execute_action` | Execute a single action immediately or after countdown | `action`, `after`, `label`, `prompt`, `window`, `foreground`, `pre_sleep_grace`, `post_wake_delay`, `start_in`, `start_at`, `async_execution` |
-| `act_schedule_queue` | Build and execute a multi-step queue | `steps` (array of step objects), `save_profile_path`, `start_in`, `start_at`, `async_execution` |
-| `act_run_profile` | Execute a saved `.act` profile headlessly | `profile_path`, `start_in`, `start_at`, `async_execution` |
+| `act_execute_action` | Execute a single action immediately or after countdown | `action`, `after`, `label`, `prompt`, `window`, `foreground`, `pre_sleep_grace`, `post_wake_delay`, `repeat_count`, `start_in`, `start_at`, `async_execution` |
+| `act_schedule_queue` | Build and execute a multi-step queue | `steps` (array of step objects), `repeat_count`, `save_profile_path`, `start_in`, `start_at`, `async_execution` |
+| `act_run_profile` | Execute a saved `.act` profile headlessly | `profile_path`, `repeat_count`, `start_in`, `start_at`, `async_execution` |
 | `act_save_profile` | Validate and save steps to a `.act` profile file | `profile_path`, `steps` |
-| `act_get_status` | Query active queue progress, remaining seconds, and phase in real time | (none) |
+| `act_reorder_queue` | Reorder steps in a profile or validate move indices | `from_index`, `to_index`, `profile_path` |
+| `act_get_status` | Query active queue progress, remaining seconds, iteration count, and phase in real time | (none) |
+| `act_get_cursor_pos` | Query current screen coordinates (X, Y) of mouse cursor | (none) |
+| `act_get_window_rect` | Query bounding box (X, Y, Width, Height) of a window by title | `window` |
 | `act_cancel` | Immediately cancel active timer or queue | (none) |
 | `act_list_windows` | Enumerate visible window titles for window-specific targeting | (none) |
 | `act_set_caffeine` | Direct toggle of screen/sleep keep-awake mode | `active`, `duration_seconds` |
@@ -92,6 +97,8 @@ act <subcommand> --help
 
 ```powershell
 act run --profile my.act
+act run --profile my.act --repeat 5        # repeat queue 5 times
+act run --profile my.act --repeat 0        # loop infinitely until stopped
 act run --profile my.act --in 30m          # start in 30 minutes
 act run --profile my.act --start-at 23:00:00
 ```
@@ -109,7 +116,8 @@ act add type     --after 10s --prompt "hello" --window "Notepad" --foreground
 act add sleep    --after 2h  --grace 10 --post-wake 30
 act add caffeine --after 1h
 
-# Schedule start
+# Schedule start and repeat
+act add click --after 5s --repeat 3
 act add click --after 5s --in 30m
 act add click --after 5s --start-at 22:30:00
 ```
@@ -127,6 +135,17 @@ Available keys: `label=` `prompt=` `window=` `grace=` `post-wake=` `foreground`
 act queue `
   --step "sleep:2h,grace=10,post-wake=30" `
   --step "click:5s"
+
+# With repeat loop
+act queue --step "click:2s" --step "enter:1s" --repeat 5
+
+# Reorder steps in a saved profile
+act reorder --profile my.act --from 2 --to 0
+
+# Inspect mouse position and window bounds
+act get-cursor
+act get-window --window "Notepad"
+```
 
 # With text input targeting a specific window
 act queue `

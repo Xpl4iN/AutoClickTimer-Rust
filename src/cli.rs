@@ -109,6 +109,10 @@ enum Commands {
         #[arg(short, long, value_name = "FILE")]
         profile: PathBuf,
 
+        /// Number of times to loop the queue (default: 1, 0 = infinite loop)
+        #[arg(short = 'r', long, default_value = "1")]
+        repeat: u32,
+
         /// Delay before starting (e.g. 30m, 1h). Alternative to --start-at.
         #[arg(long, value_name = "DURATION", conflicts_with = "start_at")]
         r#in: Option<String>,
@@ -151,6 +155,10 @@ enum Commands {
         #[arg(long, default_value = "30")]
         post_wake: u64,
 
+        /// Number of times to repeat the action (default: 1, 0 = infinite loop)
+        #[arg(short = 'r', long, default_value = "1")]
+        repeat: u32,
+
         /// Delay before starting (e.g. 30m, 1h). Alternative to --start-at.
         #[arg(long, value_name = "DURATION", conflicts_with = "start_at")]
         r#in: Option<String>,
@@ -177,6 +185,10 @@ enum Commands {
         #[arg(long = "step", value_name = "ACTION:AFTER[,opts]", required = true)]
         steps: Vec<String>,
 
+        /// Number of times to loop the queue (default: 1, 0 = infinite loop)
+        #[arg(short = 'r', long, default_value = "1")]
+        repeat: u32,
+
         /// Save the built queue to an .act profile (without --in/--start-at, saves only)
         #[arg(long, value_name = "FILE")]
         save: Option<PathBuf>,
@@ -188,6 +200,33 @@ enum Commands {
         /// Absolute start time (HH:MM:SS). Waits until then before running.
         #[arg(long, value_name = "HH:MM:SS", conflicts_with = "in")]
         start_at: Option<String>,
+    },
+
+    /// Reorder steps in a saved .act profile file
+    Reorder {
+        /// Path to .act profile
+        #[arg(short, long, value_name = "FILE")]
+        profile: PathBuf,
+
+        /// Source index of item to move (0-indexed)
+        #[arg(short, long)]
+        from: usize,
+
+        /// Destination index (0-indexed)
+        #[arg(short, long)]
+        to: usize,
+    },
+
+    /// Get current screen coordinates (X, Y) of the mouse cursor
+    #[command(name = "get-cursor")]
+    GetCursor,
+
+    /// Get bounding rectangle (X, Y, Width, Height) of a visible window
+    #[command(name = "get-window")]
+    GetWindow {
+        /// Target window title substring
+        #[arg(short, long, value_name = "TITLE")]
+        window: String,
     },
 
     /// Enable keep-awake (caffeine) for a set duration, then disable
@@ -337,7 +376,52 @@ pub fn run_cli() -> ! {
         }
 
         // ------------------------------------------------------------------
-        Commands::Run { profile, r#in: delay, start_at } => {
+        Commands::GetCursor => {
+            let (x, y) = crate::platform::windows::input::get_cursor_pos();
+            println!("Cursor position: X={}, Y={}", x, y);
+            process::exit(0);
+        }
+
+        // ------------------------------------------------------------------
+        Commands::GetWindow { window } => {
+            match crate::platform::windows::input::get_window_rect_by_title(&window) {
+                Some((x, y, w, h)) => {
+                    println!("Window '{}': X={}, Y={}, Width={}, Height={}", window, x, y, w, h);
+                    process::exit(0);
+                }
+                None => {
+                    eprintln!("error: window matching '{}' not found.", window);
+                    process::exit(1);
+                }
+            }
+        }
+
+        // ------------------------------------------------------------------
+        Commands::Reorder { profile, from, to } => {
+            let content = match std::fs::read_to_string(&profile) {
+                Ok(c) => c,
+                Err(e) => { eprintln!("error: cannot read '{}': {}", profile.display(), e); process::exit(1); }
+            };
+            let mut queue: Vec<Item> = match serde_json::from_str(&content) {
+                Ok(q) => q,
+                Err(e) => { eprintln!("error: invalid .act profile: {}", e); process::exit(1); }
+            };
+            if let Err(e) = crate::models::reorder_queue(&mut queue, from, to) {
+                eprintln!("error: {}", e);
+                process::exit(1);
+            }
+            let json = serde_json::to_string_pretty(&queue)
+                .unwrap_or_else(|e| { eprintln!("error: {}", e); process::exit(1); });
+            if let Err(e) = std::fs::write(&profile, &json) {
+                eprintln!("error writing profile: {}", e);
+                process::exit(1);
+            }
+            println!("Reordered item from index {} to {} in '{}'.", from, to, profile.display());
+            process::exit(0);
+        }
+
+        // ------------------------------------------------------------------
+        Commands::Run { profile, repeat, r#in: delay, start_at } => {
             let content = match std::fs::read_to_string(&profile) {
                 Ok(c) => c,
                 Err(e) => { eprintln!("error: cannot read '{}': {}", profile.display(), e); process::exit(1); }
@@ -348,13 +432,13 @@ pub fn run_cli() -> ! {
             };
             if queue.is_empty() { eprintln!("error: profile contains no items."); process::exit(1); }
             let scheduled = resolve_start(delay.as_deref(), start_at.as_deref());
-            run_queue(queue, scheduled);
+            run_queue(queue, scheduled, repeat);
         }
 
         // ------------------------------------------------------------------
         Commands::Add {
             action, after, label, prompt, window, foreground,
-            grace, post_wake, r#in: delay, start_at,
+            grace, post_wake, repeat, r#in: delay, start_at,
         } => {
             let secs = parse_duration_or_clock(&after).unwrap_or_else(|| {
                 eprintln!("error: invalid --after '{}'. Use 5s / 1m30s / 2h or HH:MM:SS.", after);
@@ -372,11 +456,11 @@ pub fn run_cli() -> ! {
             if let Some(w) = window { item.target_window = w; }
 
             let scheduled = resolve_start(delay.as_deref(), start_at.as_deref());
-            run_queue(vec![item], scheduled);
+            run_queue(vec![item], scheduled, repeat);
         }
 
         // ------------------------------------------------------------------
-        Commands::Queue { steps, save, r#in: delay, start_at } => {
+        Commands::Queue { steps, repeat, save, r#in: delay, start_at } => {
             let mut queue: Vec<Item> = Vec::new();
             for (i, raw) in steps.iter().enumerate() {
                 match parse_step(raw) {
@@ -399,7 +483,7 @@ pub fn run_cli() -> ! {
             }
 
             let scheduled = resolve_start(delay.as_deref(), start_at.as_deref());
-            run_queue(queue, scheduled);
+            run_queue(queue, scheduled, repeat);
         }
     }
 }
@@ -408,8 +492,15 @@ pub fn run_cli() -> ! {
 // Queue runner (headless, stdout-only)
 // ---------------------------------------------------------------------------
 
-fn run_queue(queue: Vec<Item>, start_at: Option<chrono::DateTime<Local>>) -> ! {
-    println!("AutoClickTimer v{} -- {} item(s) queued.", CURRENT_VERSION, queue.len());
+fn run_queue(queue: Vec<Item>, start_at: Option<chrono::DateTime<Local>>, repeat: u32) -> ! {
+    let rep_label = if repeat == 0 {
+        " (Loop: infinite)".to_string()
+    } else if repeat > 1 {
+        format!(" (Loop: {}x)", repeat)
+    } else {
+        String::new()
+    };
+    println!("AutoClickTimer v{} -- {} item(s) queued{}.", CURRENT_VERSION, queue.len(), rep_label);
 
     if let Some(t) = start_at {
         let wait = (t - Local::now()).num_seconds().max(0) as u64;
@@ -422,7 +513,7 @@ fn run_queue(queue: Vec<Item>, start_at: Option<chrono::DateTime<Local>>) -> ! {
     let cb_code   = Arc::clone(&exit_code);
 
     let mut executor = QueueExecutor::new();
-    executor.start(queue, start_at, move |event| handle_event(&event, &cb_code));
+    executor.start(queue, start_at, repeat, move |event| handle_event(&event, &cb_code));
 
     loop {
         std::thread::sleep(Duration::from_millis(200));

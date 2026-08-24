@@ -283,7 +283,7 @@ component CaffeineToggle inherits Rectangle {
 }
 
 export component AppWindow inherits Window {
-    title: "AutoClick Timer  v1.4.0";
+    title: "AutoClick Timer  v1.4.1";
     icon: @image-url("app_icon.png");
     min-width: 880px;
     min-height: 640px;
@@ -310,11 +310,15 @@ export component AppWindow inherits Window {
     callback refresh_windows();
     callback set_time_preset(int, string, int); // amount, unit, mode
     callback set_sleep_time_preset(int, string, int); // amount, unit, sleep_mode
+    callback move_item(int, int); // from_index, to_index
 
     // Bound properties from Rust backend
     in-out property <[QueueItemData]> queue_items: [];
     in-out property <bool> is_running: false;
     in-out property <bool> caffeine_active: false;
+    in-out property <int> repeat_count: 1;
+    in-out property <bool> infinite_loop: false;
+    in-out property <string> repeat_input: "1";
     in-out property <string> current_language: "DE";
     in-out property <bool> update_available: false;
     in-out property <string> update_tag: "";
@@ -366,7 +370,7 @@ export component AppWindow inherits Window {
 
             // App Title & Version (Clean Title matching Python)
             Text {
-                text: "AutoClick Timer  v1.4.0";
+                text: "AutoClick Timer  v1.4.1";
                 font-size: 20px;
                 font-weight: 700;
                 color: #e8e8ea;
@@ -1292,17 +1296,77 @@ export component AppWindow inherits Window {
                 min-width: 420px;
                 spacing: 8px;
 
-                // Header
+                // Header with Repeat Controls
                 HorizontalLayout {
                     alignment: space-between;
-                    height: 20px;
-                    Text {
-                        text: root.current_language == "DE" ? "WARTESCHLANGE" : "QUEUE";
-                        font-size: 10px;
-                        font-weight: 700;
-                        color: #8b8b99;
-                        vertical-alignment: center;
+                    height: 24px;
+
+                    HorizontalLayout {
+                        spacing: 12px;
+                        alignment: start;
+
+                        Text {
+                            text: root.current_language == "DE" ? "WARTESCHLANGE" : "QUEUE";
+                            font-size: 10px;
+                            font-weight: 700;
+                            color: #8b8b99;
+                            vertical-alignment: center;
+                        }
+
+                        // Repeat / Loop Selector
+                        HorizontalLayout {
+                            spacing: 4px;
+                            alignment: center;
+
+                            Text {
+                                text: root.current_language == "DE" ? "Wiederholen:" : "Repeat:";
+                                font-size: 10px;
+                                color: #8b8b99;
+                                vertical-alignment: center;
+                            }
+
+                            Rectangle {
+                                width: 34px;
+                                height: 22px;
+                                background: #202026;
+                                border-width: 1px;
+                                border-color: root.infinite_loop ? #3f3f4c : #4891A1;
+                                border-radius: 4px;
+                                LineEdit {
+                                    text <=> root.repeat_input;
+                                    font-size: 10px;
+                                    horizontal-alignment: center;
+                                    enabled: !root.is_running && !root.infinite_loop;
+                                }
+                            }
+
+                            Rectangle {
+                                width: 26px;
+                                height: 22px;
+                                background: root.infinite_loop ? #4891A1 : (touch_inf.has-hover ? #2e2e38 : #202026);
+                                border-width: 1px;
+                                border-color: root.infinite_loop ? #4891A1 : #3f3f4c;
+                                border-radius: 4px;
+                                touch_inf := TouchArea {
+                                    mouse-cursor: root.is_running ? default : pointer;
+                                    clicked => {
+                                        if (!root.is_running) {
+                                            root.infinite_loop = !root.infinite_loop;
+                                        }
+                                    }
+                                }
+                                Text {
+                                    text: "∞";
+                                    font-size: 12px;
+                                    font-weight: 700;
+                                    color: root.infinite_loop ? #ffffff : #8b8b99;
+                                    vertical-alignment: center;
+                                    horizontal-alignment: center;
+                                }
+                            }
+                        }
                     }
+
                     Text {
                         text: root.status_text;
                         font-size: 11px;
@@ -1397,9 +1461,9 @@ export component AppWindow inherits Window {
                                                 }
                                             }
 
-                                            // Right: Status text + Countdown + Delete button
+                                            // Right: Status text + Countdown + Move buttons + Delete button
                                             HorizontalLayout {
-                                                spacing: 8px;
+                                                spacing: 6px;
                                                 alignment: end;
 
                                                 VerticalLayout {
@@ -1420,21 +1484,73 @@ export component AppWindow inherits Window {
                                                     }
                                                 }
 
-                                                if !root.is_running: Rectangle {
-                                                    width: 24px;
-                                                    height: 24px;
-                                                    background: touch_del.has-hover ? #2e1414 : transparent;
-                                                    border-radius: 6px;
-                                                    touch_del := TouchArea {
-                                                        mouse-cursor: pointer;
-                                                        clicked => { root.remove_item(idx); }
+                                                if !root.is_running: HorizontalLayout {
+                                                    spacing: 2px;
+                                                    alignment: center;
+
+                                                    // Up Button
+                                                    Rectangle {
+                                                        width: 20px;
+                                                        height: 22px;
+                                                        background: touch_up.has-hover && idx > 0 ? #2e2e38 : transparent;
+                                                        border-radius: 4px;
+                                                        touch_up := TouchArea {
+                                                            mouse-cursor: idx > 0 ? pointer : default;
+                                                            clicked => {
+                                                                if (idx > 0) {
+                                                                    root.move_item(idx, idx - 1);
+                                                                }
+                                                            }
+                                                        }
+                                                        Text {
+                                                            text: "▲";
+                                                            font-size: 8px;
+                                                            color: idx > 0 ? #8b8b99 : #3f3f4c;
+                                                            vertical-alignment: center;
+                                                            horizontal-alignment: center;
+                                                        }
                                                     }
-                                                    Text {
-                                                        text: "✕";
-                                                        font-size: 10px;
-                                                        color: #8b8b99;
-                                                        vertical-alignment: center;
-                                                        horizontal-alignment: center;
+
+                                                    // Down Button
+                                                    Rectangle {
+                                                        width: 20px;
+                                                        height: 22px;
+                                                        background: touch_down.has-hover && idx < root.queue_items.length - 1 ? #2e2e38 : transparent;
+                                                        border-radius: 4px;
+                                                        touch_down := TouchArea {
+                                                            mouse-cursor: idx < root.queue_items.length - 1 ? pointer : default;
+                                                            clicked => {
+                                                                if (idx < root.queue_items.length - 1) {
+                                                                    root.move_item(idx, idx + 1);
+                                                                }
+                                                            }
+                                                        }
+                                                        Text {
+                                                            text: "▼";
+                                                            font-size: 8px;
+                                                            color: idx < root.queue_items.length - 1 ? #8b8b99 : #3f3f4c;
+                                                            vertical-alignment: center;
+                                                            horizontal-alignment: center;
+                                                        }
+                                                    }
+
+                                                    // Delete Button
+                                                    Rectangle {
+                                                        width: 20px;
+                                                        height: 22px;
+                                                        background: touch_del.has-hover ? #2e1414 : transparent;
+                                                        border-radius: 4px;
+                                                        touch_del := TouchArea {
+                                                            mouse-cursor: pointer;
+                                                            clicked => { root.remove_item(idx); }
+                                                        }
+                                                        Text {
+                                                            text: "✕";
+                                                            font-size: 10px;
+                                                            color: #8b8b99;
+                                                            vertical-alignment: center;
+                                                            horizontal-alignment: center;
+                                                        }
                                                     }
                                                 }
                                             }
