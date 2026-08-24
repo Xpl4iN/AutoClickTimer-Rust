@@ -26,15 +26,45 @@ component NumInput inherits Rectangle {
     border-radius: 6px;
 
     input := TextInput {
-        x: 4px;
-        width: parent.width - 8px;
+        x: 2px;
+        width: parent.width - 4px;
         height: parent.height;
         vertical-alignment: center;
         horizontal-alignment: root.horizontal-alignment;
         font-family: "Segoe UI";
         font-size: root.font-size;
         font-weight: 700;
-        color: #e8e8ea;
+        color: root.enabled ? #e8e8ea : #555566;
+        selection-background-color: #4891A1;
+        selection-foreground-color: #ffffff;
+        enabled: root.enabled;
+    }
+}
+
+// Clean text input matching CustomTkinter theme
+component CustomTextInput inherits Rectangle {
+    in-out property <string> text <=> input.text;
+    in-out property <bool> has-focus: input.has-focus;
+    in property <TextHorizontalAlignment> horizontal-alignment: left;
+    in property <length> font-size: 11px;
+    in property <bool> enabled: true;
+
+    height: 30px;
+    background: #202026;
+    border-width: 1px;
+    border-color: input.has-focus ? #4891A1 : #3f3f4c;
+    border-radius: 6px;
+
+    input := TextInput {
+        x: 8px;
+        width: parent.width - 16px;
+        height: parent.height;
+        vertical-alignment: center;
+        horizontal-alignment: root.horizontal-alignment;
+        font-family: "Segoe UI";
+        font-size: root.font-size;
+        font-weight: 400;
+        color: root.enabled ? #e8e8ea : #555566;
         selection-background-color: #4891A1;
         selection-foreground-color: #ffffff;
         enabled: root.enabled;
@@ -283,7 +313,7 @@ component CaffeineToggle inherits Rectangle {
 }
 
 export component AppWindow inherits Window {
-    title: "AutoClick Timer  v1.4.1";
+    title: "AutoClick Timer  v1.4.2";
     icon: @image-url("app_icon.png");
     min-width: 880px;
     min-height: 640px;
@@ -293,7 +323,7 @@ export component AppWindow inherits Window {
     default-font-family: "Segoe UI";
 
     // Callbacks to Rust backend
-    callback add_item(int, int, int, int, string, string, string, int, int, int, int, int, string, bool);
+    callback add_item(int, int, int, int, string, string, string, int, int, int, int, int, string, bool, string, string, string);
     callback add_preset(string, int, int, int, int);
     callback remove_item(int);
     callback start_queue();
@@ -311,6 +341,7 @@ export component AppWindow inherits Window {
     callback set_time_preset(int, string, int); // amount, unit, mode
     callback set_sleep_time_preset(int, string, int); // amount, unit, sleep_mode
     callback move_item(int, int); // from_index, to_index
+    callback pick_cursor_position();
 
     // Bound properties from Rust backend
     in-out property <[QueueItemData]> queue_items: [];
@@ -328,15 +359,20 @@ export component AppWindow inherits Window {
     in-out property <[string]> window_list: ["(Global / Aktives Fenster)"];
     in-out property <string> selected_window: "(Global / Aktives Fenster)";
     in-out property <string> status_text: "";
+    in-out property <string> iteration_badge_text: "";
+    in-out property <string> cursor_pos_text: "0, 0";
     in-out property <string> failsafe_text: "Notfall-Stop: Maus ganz oben-links in die Bildschirmecke schieben";
     in-out property <string> clock_preview_text: "";
     in-out property <string> sleep_clock_preview_text: "";
+    in-out property <string> pick_btn_text: "Position erfassen (F6)";
     in-out property <int> mode_type: 0; // 0 = Timer (Dauer), 1 = Uhrzeit
     in-out property <int> sleep_mode_type: 0; // 0 = Timer (Dauer), 1 = Uhrzeit
 
     // Local UI state
     property <int> active_tab: 0; // 0 = Action, 1 = Presets
     property <string> selected_action: "enter"; // "enter", "click", "type", "sleep", "shutdown"
+    property <int> click_type_index: 0; // 0 = Left Click, 1 = Right Click, 2 = Double Click
+    in-out property <int> click_coords_mode: 0; // 0 = Current Position, 1 = Fixed (X, Y)
     property <bool> log_expanded: false;
     property <bool> show_start_later_modal: false;
     property <string> start_later_input: "15";
@@ -347,6 +383,8 @@ export component AppWindow inherits Window {
     in-out property <string> input_s: "5";
     in-out property <string> input_prompt: "";
     in-out property <string> input_label: "";
+    in-out property <string> input_click_x: "";
+    in-out property <string> input_click_y: "";
     in-out property <string> input_grace_h: "0";
     in-out property <string> input_grace_m: "0";
     in-out property <string> input_grace_s: "5";
@@ -370,7 +408,7 @@ export component AppWindow inherits Window {
 
             // App Title & Version (Clean Title matching Python)
             Text {
-                text: "AutoClick Timer  v1.4.1";
+                text: "AutoClick Timer  v1.4.2";
                 font-size: 20px;
                 font-weight: 700;
                 color: #e8e8ea;
@@ -381,6 +419,38 @@ export component AppWindow inherits Window {
             HorizontalLayout {
                 spacing: 12px;
                 alignment: end;
+
+                // Live Cursor Position Chip
+                Rectangle {
+                    height: 28px;
+                    background: #16161a;
+                    border-width: 1px;
+                    border-color: #3f3f4c;
+                    border-radius: 8px;
+
+                    HorizontalLayout {
+                        padding-left: 8px;
+                        padding-right: 8px;
+                        spacing: 4px;
+                        alignment: center;
+
+                        Text {
+                            text: "Cursor:";
+                            font-size: 10px;
+                            font-weight: 700;
+                            color: #8b8b99;
+                            vertical-alignment: center;
+                        }
+
+                        Text {
+                            text: root.cursor_pos_text;
+                            font-size: 10px;
+                            font-weight: 700;
+                            color: #4891A1;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
 
                 // Failsafe Tip
                 Text {
@@ -850,6 +920,147 @@ export component AppWindow inherits Window {
                             }
                         }
 
+                        // 5. Dynamic Section: CLICK CONFIGURATION (Click type, Coordinates mode, X/Y inputs, Pick button)
+                        if root.selected_action == "click": VerticalLayout {
+                            spacing: 6px;
+                            alignment: start;
+
+                            Text {
+                                text: root.current_language == "DE" ? "Klick-Optionen:" : "Click Options:";
+                                font-size: 10px;
+                                font-weight: 700;
+                                color: #8b8b99;
+                            }
+
+                            // Click Type Sub-selector (Linksklick | Rechtsklick | Doppelklick)
+                            HorizontalLayout {
+                                spacing: 4px;
+                                height: 26px;
+
+                                ActionTypePill {
+                                    horizontal-stretch: 1;
+                                    height: 26px;
+                                    text: root.current_language == "DE" ? "Linksklick" : "Left Click";
+                                    selected: root.click_type_index == 0;
+                                    clicked => { root.click_type_index = 0; }
+                                }
+
+                                ActionTypePill {
+                                    horizontal-stretch: 1;
+                                    height: 26px;
+                                    text: root.current_language == "DE" ? "Rechtsklick" : "Right Click";
+                                    selected: root.click_type_index == 1;
+                                    clicked => { root.click_type_index = 1; }
+                                }
+
+                                ActionTypePill {
+                                    horizontal-stretch: 1;
+                                    height: 26px;
+                                    text: root.current_language == "DE" ? "Doppelklick" : "Double Click";
+                                    selected: root.click_type_index == 2;
+                                    clicked => { root.click_type_index = 2; }
+                                }
+                            }
+
+                            // Coordinate Mode (Radio Buttons: Aktuelle Position vs Feste Koordinaten)
+                            HorizontalLayout {
+                                spacing: 16px;
+                                alignment: start;
+
+                                CustomRadioButton {
+                                    text: root.current_language == "DE" ? "Aktuelle Mausposition" : "Current Cursor";
+                                    checked: root.click_coords_mode == 0;
+                                    clicked => { root.click_coords_mode = 0; }
+                                }
+
+                                CustomRadioButton {
+                                    text: root.current_language == "DE" ? "Feste Koordinaten (X, Y)" : "Fixed (X, Y)";
+                                    checked: root.click_coords_mode == 1;
+                                    clicked => {
+                                        root.click_coords_mode = 1;
+                                        if (root.input_click_x == "" || root.input_click_y == "") {
+                                            root.pick_cursor_position();
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Fixed Coordinates Input Box + Pick Button
+                            if root.click_coords_mode == 1: VerticalLayout {
+                                spacing: 4px;
+                                alignment: start;
+
+                                HorizontalLayout {
+                                    spacing: 8px;
+                                    height: 28px;
+                                    alignment: start;
+
+                                    HorizontalLayout {
+                                        spacing: 4px;
+                                        alignment: center;
+                                        Text {
+                                            text: "X:";
+                                            font-size: 11px;
+                                            font-weight: 700;
+                                            color: #8b8b99;
+                                            vertical-alignment: center;
+                                        }
+                                        NumInput {
+                                            width: 55px;
+                                            height: 28px;
+                                            font-size: 11px;
+                                            text <=> root.input_click_x;
+                                        }
+                                    }
+
+                                    HorizontalLayout {
+                                        spacing: 4px;
+                                        alignment: center;
+                                        Text {
+                                            text: "Y:";
+                                            font-size: 11px;
+                                            font-weight: 700;
+                                            color: #8b8b99;
+                                            vertical-alignment: center;
+                                        }
+                                        NumInput {
+                                            width: 55px;
+                                            height: 28px;
+                                            font-size: 11px;
+                                            text <=> root.input_click_y;
+                                        }
+                                    }
+
+                                    Rectangle {
+                                        width: 175px;
+                                        height: 28px;
+                                        background: touch_pick.has-hover ? #3a7683 : #202026;
+                                        border-width: 1px;
+                                        border-color: #4891A1;
+                                        border-radius: 6px;
+                                        touch_pick := TouchArea {
+                                            mouse-cursor: pointer;
+                                            clicked => { root.pick_cursor_position(); }
+                                        }
+                                        Text {
+                                            text: root.pick_btn_text;
+                                            font-size: 10px;
+                                            font-weight: 700;
+                                            color: #4891A1;
+                                            vertical-alignment: center;
+                                            horizontal-alignment: center;
+                                        }
+                                    }
+                                }
+
+                                Text {
+                                    text: root.current_language == "DE" ? "Tipp: Maus auf Ziel bewegen & F6 drücken (oder Button für 3s Countdown)" : "Tip: Move mouse over target & press F6 (or click button for 3s delay)";
+                                    font-size: 9px;
+                                    color: #8b8b99;
+                                }
+                            }
+                        }
+
                         // 6. Dynamic Section: PROMPT TEXT (when action == "type")
                         if root.selected_action == "type": VerticalLayout {
                             spacing: 2px;
@@ -859,7 +1070,7 @@ export component AppWindow inherits Window {
                                 font-size: 10px;
                                 color: #8b8b99;
                             }
-                            LineEdit {
+                            CustomTextInput {
                                 text <=> root.input_prompt;
                                 font-size: 11px;
                                 height: 32px;
@@ -919,7 +1130,7 @@ export component AppWindow inherits Window {
                                 color: #8b8b99;
                                 vertical-alignment: center;
                             }
-                            LineEdit {
+                            CustomTextInput {
                                 text <=> root.input_label;
                                 font-size: 11px;
                                 height: 30px;
@@ -944,7 +1155,10 @@ export component AppWindow inherits Window {
                                     root.input_grace_s.to-float(),
                                     root.input_postwake.to-float(),
                                     root.selected_window,
-                                    root.input_require_fg
+                                    root.input_require_fg,
+                                    root.click_type_index == 1 ? "right" : (root.click_type_index == 2 ? "double" : "left"),
+                                    root.click_coords_mode == 1 ? root.input_click_x : "",
+                                    root.click_coords_mode == 1 ? root.input_click_y : ""
                                 );
                             }
                         }
@@ -1296,83 +1510,67 @@ export component AppWindow inherits Window {
                 min-width: 420px;
                 spacing: 8px;
 
-                // Header with Repeat Controls
+                // Header with Title, Live Iteration Badge & Status
                 HorizontalLayout {
                     alignment: space-between;
                     height: 24px;
 
                     HorizontalLayout {
-                        spacing: 12px;
+                        spacing: 8px;
                         alignment: start;
 
                         Text {
                             text: root.current_language == "DE" ? "WARTESCHLANGE" : "QUEUE";
-                            font-size: 10px;
+                            font-size: 11px;
                             font-weight: 700;
                             color: #8b8b99;
                             vertical-alignment: center;
                         }
 
-                        // Repeat / Loop Selector
-                        HorizontalLayout {
-                            spacing: 4px;
-                            alignment: center;
+                        if root.queue_items.length > 0: Text {
+                            text: root.current_language == "DE" ? ("(" + root.queue_items.length + " Aktionen)") : ("(" + root.queue_items.length + " Actions)");
+                            font-size: 10px;
+                            font-weight: 600;
+                            color: #4891A1;
+                            vertical-alignment: center;
+                        }
+                    }
 
-                            Text {
-                                text: root.current_language == "DE" ? "Wiederholen:" : "Repeat:";
-                                font-size: 10px;
-                                color: #8b8b99;
-                                vertical-alignment: center;
-                            }
+                    // Right: Iteration Badge + Status Text
+                    HorizontalLayout {
+                        spacing: 8px;
+                        alignment: end;
 
-                            Rectangle {
-                                width: 34px;
-                                height: 22px;
-                                background: #202026;
-                                border-width: 1px;
-                                border-color: root.infinite_loop ? #3f3f4c : #4891A1;
-                                border-radius: 4px;
-                                LineEdit {
-                                    text <=> root.repeat_input;
-                                    font-size: 10px;
-                                    horizontal-alignment: center;
-                                    enabled: !root.is_running && !root.infinite_loop;
-                                }
-                            }
+                        if root.iteration_badge_text != "": Rectangle {
+                            height: 22px;
+                            background: #202026;
+                            border-width: 1px;
+                            border-color: #4891A1;
+                            border-radius: 6px;
 
-                            Rectangle {
-                                width: 26px;
-                                height: 22px;
-                                background: root.infinite_loop ? #4891A1 : (touch_inf.has-hover ? #2e2e38 : #202026);
-                                border-width: 1px;
-                                border-color: root.infinite_loop ? #4891A1 : #3f3f4c;
-                                border-radius: 4px;
-                                touch_inf := TouchArea {
-                                    mouse-cursor: root.is_running ? default : pointer;
-                                    clicked => {
-                                        if (!root.is_running) {
-                                            root.infinite_loop = !root.infinite_loop;
-                                        }
-                                    }
-                                }
+                            HorizontalLayout {
+                                padding-left: 8px;
+                                padding-right: 8px;
+                                alignment: center;
+
                                 Text {
-                                    text: "∞";
-                                    font-size: 12px;
+                                    text: root.iteration_badge_text;
+                                    font-size: 10px;
                                     font-weight: 700;
-                                    color: root.infinite_loop ? #ffffff : #8b8b99;
+                                    color: #4891A1;
                                     vertical-alignment: center;
                                     horizontal-alignment: center;
                                 }
                             }
                         }
-                    }
 
-                    Text {
-                        text: root.status_text;
-                        font-size: 11px;
-                        font-weight: 700;
-                        color: #4891A1;
-                        vertical-alignment: center;
+                        Text {
+                            text: root.status_text;
+                            font-size: 11px;
+                            font-weight: 700;
+                            color: #4891A1;
+                            vertical-alignment: center;
+                        }
                     }
                 }
 
@@ -1387,7 +1585,85 @@ export component AppWindow inherits Window {
 
                     VerticalLayout {
                         padding: 10px;
+                        spacing: 8px;
                         vertical-stretch: 1;
+
+                        // Dedicated Loop / Repeat Toolbar inside Card
+                        HorizontalLayout {
+                            alignment: space-between;
+                            height: 26px;
+
+                            HorizontalLayout {
+                                spacing: 6px;
+                                alignment: start;
+
+                                Text {
+                                    text: root.current_language == "DE" ? "Wiederholen:" : "Repeat:";
+                                    font-size: 10px;
+                                    font-weight: 600;
+                                    color: root.infinite_loop ? #4891A1 : #8b8b99;
+                                    vertical-alignment: center;
+                                }
+
+                                if !root.infinite_loop: NumInput {
+                                    width: 38px;
+                                    height: 24px;
+                                    font-size: 11px;
+                                    text <=> root.repeat_input;
+                                    enabled: !root.is_running;
+                                }
+
+                                if !root.infinite_loop && !root.is_running: PresetButton {
+                                    width: 28px;
+                                    height: 24px;
+                                    text: "1x";
+                                    clicked => { root.repeat_input = "1"; }
+                                }
+                                if !root.infinite_loop && !root.is_running: PresetButton {
+                                    width: 28px;
+                                    height: 24px;
+                                    text: "2x";
+                                    clicked => { root.repeat_input = "2"; }
+                                }
+                                if !root.infinite_loop && !root.is_running: PresetButton {
+                                    width: 28px;
+                                    height: 24px;
+                                    text: "5x";
+                                    clicked => { root.repeat_input = "5"; }
+                                }
+
+                                Rectangle {
+                                    width: 28px;
+                                    height: 24px;
+                                    background: root.infinite_loop ? #4891A1 : (touch_inf.has-hover ? #2e2e38 : #202026);
+                                    border-width: 1px;
+                                    border-color: root.infinite_loop ? #4891A1 : #3f3f4c;
+                                    border-radius: 4px;
+                                    touch_inf := TouchArea {
+                                        mouse-cursor: root.is_running ? default : pointer;
+                                        clicked => {
+                                            if (!root.is_running) {
+                                                root.infinite_loop = !root.infinite_loop;
+                                            }
+                                        }
+                                    }
+                                    Text {
+                                        text: "∞";
+                                        font-size: 13px;
+                                        font-weight: 700;
+                                        color: root.infinite_loop ? #ffffff : #8b8b99;
+                                        vertical-alignment: center;
+                                        horizontal-alignment: center;
+                                    }
+                                }
+                            }
+                        }
+
+                        // Divider
+                        Rectangle {
+                            height: 1px;
+                            background: #282830;
+                        }
 
                         // Empty state
                         if root.queue_items.length == 0: VerticalLayout {

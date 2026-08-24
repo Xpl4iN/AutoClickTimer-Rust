@@ -305,6 +305,16 @@ impl McpServer {
             post_wake_delay: post_wake,
         };
 
+        if let Some(x) = args.get("x").and_then(|v| v.as_i64()) {
+            item.click_x = Some(x as i32);
+        }
+        if let Some(y) = args.get("y").and_then(|v| v.as_i64()) {
+            item.click_y = Some(y as i32);
+        }
+        if let Some(btn) = args.get("button").and_then(|v| v.as_str()) {
+            item.click_btn = Some(btn.to_string());
+        }
+
         let repeat = args.get("repeat_count").and_then(|v| v.as_u64()).unwrap_or(1) as u32;
 
         let start_in = args.get("start_in").and_then(|v| v.as_str());
@@ -358,6 +368,16 @@ impl McpServer {
                 pre_sleep_grace: grace,
                 post_wake_delay: post_wake,
             };
+
+            if let Some(x) = step.get("x").and_then(|v| v.as_i64()) {
+                item.click_x = Some(x as i32);
+            }
+            if let Some(y) = step.get("y").and_then(|v| v.as_i64()) {
+                item.click_y = Some(y as i32);
+            }
+            if let Some(btn) = step.get("button").and_then(|v| v.as_str()) {
+                item.click_btn = Some(btn.to_string());
+            }
 
             queue.push(item);
         }
@@ -734,6 +754,19 @@ fn get_tool_definitions() -> Vec<Value> {
                         "type": "integer",
                         "description": "Post-wake delay in seconds (sleep action only, default 30)."
                     },
+                    "x": {
+                        "type": "integer",
+                        "description": "Target screen X coordinate for click actions (optional)."
+                    },
+                    "y": {
+                        "type": "integer",
+                        "description": "Target screen Y coordinate for click actions (optional)."
+                    },
+                    "button": {
+                        "type": "string",
+                        "enum": ["left", "right", "double", "middle"],
+                        "description": "Mouse button type (click action only, default 'left')."
+                    },
                     "repeat_count": {
                         "type": "integer",
                         "description": "Number of times to repeat the action (default: 1, 0 = infinite loop)."
@@ -780,7 +813,10 @@ fn get_tool_definitions() -> Vec<Value> {
                                 "window": { "type": "string" },
                                 "foreground": { "type": "boolean" },
                                 "pre_sleep_grace": { "type": "integer" },
-                                "post_wake_delay": { "type": "integer" }
+                                "post_wake_delay": { "type": "integer" },
+                                "x": { "type": "integer", "description": "Target screen X coordinate (click only)." },
+                                "y": { "type": "integer", "description": "Target screen Y coordinate (click only)." },
+                                "button": { "type": "string", "enum": ["left", "right", "double", "middle"], "description": "Mouse button type (click only)." }
                             },
                             "required": ["action", "after"]
                         }

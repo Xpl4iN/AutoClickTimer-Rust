@@ -81,6 +81,12 @@ pub struct Item {
     pub target_window: String,
     #[serde(default)]
     pub require_foreground: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub click_x: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub click_y: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub click_btn: Option<String>,
 
     // Runtime state (skipped during serialization)
     #[serde(skip)]
@@ -144,6 +150,9 @@ impl Item {
             sleep_cfg: SleepConfig::default(),
             target_window: String::new(),
             require_foreground: false,
+            click_x: None,
+            click_y: None,
+            click_btn: None,
             status: ItemStatus::Waiting,
             rem: total,
             phase: ItemPhase::None,
@@ -240,6 +249,9 @@ mod tests {
             },
             target_window: "Notepad".to_string(),
             require_foreground: true,
+            click_x: None,
+            click_y: None,
+            click_btn: None,
             status: ItemStatus::Running,
             rem: 150,
             phase: ItemPhase::Grace,

@@ -155,6 +155,18 @@ enum Commands {
         #[arg(long, default_value = "30")]
         post_wake: u64,
 
+        /// Target screen X coordinate for click actions
+        #[arg(long)]
+        x: Option<i32>,
+
+        /// Target screen Y coordinate for click actions
+        #[arg(long)]
+        y: Option<i32>,
+
+        /// Mouse button: left | right | double | middle (click action only)
+        #[arg(long, default_value = "left")]
+        button: String,
+
         /// Number of times to repeat the action (default: 1, 0 = infinite loop)
         #[arg(short = 'r', long, default_value = "1")]
         repeat: u32,
@@ -438,7 +450,7 @@ pub fn run_cli() -> ! {
         // ------------------------------------------------------------------
         Commands::Add {
             action, after, label, prompt, window, foreground,
-            grace, post_wake, repeat, r#in: delay, start_at,
+            grace, post_wake, x, y, button, repeat, r#in: delay, start_at,
         } => {
             let secs = parse_duration_or_clock(&after).unwrap_or_else(|| {
                 eprintln!("error: invalid --after '{}'. Use 5s / 1m30s / 2h or HH:MM:SS.", after);
@@ -453,6 +465,9 @@ pub fn run_cli() -> ! {
             item.prompt             = prompt.unwrap_or_default();
             item.require_foreground = foreground;
             item.sleep_cfg          = SleepConfig { pre_sleep_grace: grace, post_wake_delay: post_wake };
+            item.click_x            = x;
+            item.click_y            = y;
+            item.click_btn          = Some(button);
             if let Some(w) = window { item.target_window = w; }
 
             let scheduled = resolve_start(delay.as_deref(), start_at.as_deref());
@@ -529,6 +544,13 @@ fn handle_event(event: &ExecutorEvent, exit_code: &Arc<Mutex<i32>>) {
         ExecutorEvent::Log(msg) => {
             println!("[{}] {}", Local::now().format("%H:%M:%S"), msg);
         }
+        ExecutorEvent::IterationStart { current_iteration, total_iterations } => {
+            if *total_iterations == 0 {
+                println!("\n=== Iteration {} (Infinite Loop) ===", current_iteration);
+            } else if *total_iterations > 1 {
+                println!("\n=== Iteration {}/{} ===", current_iteration, total_iterations);
+            }
+        }
         ExecutorEvent::StepStart { index, total_items, label, duration_secs } => {
             println!("\n[{}/{}] Starting: {} ({})", index + 1, total_items, label, fmt_duration(*duration_secs));
         }
@@ -595,6 +617,11 @@ fn parse_step(raw: &str) -> Result<Item, String> {
                                     .map_err(|_| format!("grace must be a number, got '{}'", value))?,
                     "post-wake" => item.sleep_cfg.post_wake_delay  = value.parse()
                                     .map_err(|_| format!("post-wake must be a number, got '{}'", value))?,
+                    "x"         => item.click_x = Some(value.parse()
+                                    .map_err(|_| format!("x must be an integer, got '{}'", value))?),
+                    "y"         => item.click_y = Some(value.parse()
+                                    .map_err(|_| format!("y must be an integer, got '{}'", value))?),
+                    "button"    => item.click_btn = Some(value.to_string()),
                     other       => return Err(format!("unknown option '{}'", other)),
                 }
                 remaining = tail;

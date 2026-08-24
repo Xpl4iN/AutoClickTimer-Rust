@@ -39,6 +39,10 @@ pub enum ExecutorEvent {
     StepDone {
         index: usize,
     },
+    IterationStart {
+        current_iteration: u32,
+        total_iterations: u32,
+    },
     AllDone {
         total_items: usize,
     },
@@ -199,6 +203,11 @@ fn run_worker<F>(
                 snap.current_iteration = iteration;
             }
         }
+
+        event_sink(ExecutorEvent::IterationStart {
+            current_iteration: iteration,
+            total_iterations: repeat_count,
+        });
 
         if max_iterations > 1 || is_infinite {
             let iter_label = if is_infinite {
@@ -537,7 +546,19 @@ fn dispatch_single_action(item: &Item) -> Result<(), String> {
     // Global execution
     match item.action {
         ActionType::Enter    => send_enter_global(),
-        ActionType::Click    => send_click_global(),
+        ActionType::Click    => {
+            let btn = item.click_btn.as_deref().unwrap_or("left");
+            if let (Some(x), Some(y)) = (item.click_x, item.click_y) {
+                crate::platform::windows::input::send_click_at(x, y, btn);
+            } else {
+                match btn.to_lowercase().as_str() {
+                    "right" => crate::platform::windows::input::send_right_click_global(),
+                    "double" => crate::platform::windows::input::send_double_click_global(),
+                    "middle" => crate::platform::windows::input::send_middle_click_global(),
+                    _ => send_click_global(),
+                }
+            }
+        }
         ActionType::Type     => send_type_global(&item.prompt)?,
         ActionType::Sleep    => {}
         ActionType::Shutdown => shutdown_pc(),

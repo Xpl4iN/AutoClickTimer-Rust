@@ -10,6 +10,7 @@ mod platform;
 mod updater;
 
 use std::rc::Rc;
+use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -80,8 +81,13 @@ fn main() -> Result<(), slint::PlatformError> {
 
     let executor = Arc::new(Mutex::new(QueueExecutor::new()));
 
-    // Populate initial window list
+    // Shared state for coordinate pick countdown (3.0s delay or F6 global hotkey)
+    let pick_countdown_ticks = Arc::new(AtomicI32::new(-1));
+    let reset_btn_ticks = Arc::new(AtomicI32::new(-1));
+
+    // Populate initial window list and pick button text
     refresh_window_list(&main_window);
+    main_window.set_pick_btn_text(t("pick_coords_btn").into());
 
     // ---- Restore pending item from elevated relaunch ----
     // If the process was relaunched via UAC with a --pending-item arg, deserialize
@@ -107,7 +113,7 @@ fn main() -> Result<(), slint::PlatformError> {
     {
         let state = Arc::clone(&state);
         let window_handle = window_handle.clone();
-        main_window.on_add_item(move |mode, h, m, s, action_str, prompt, label, sleep_mode, grace_h, grace_m, grace_s, post_wake, target_win, require_fg| {
+        main_window.on_add_item(move |mode, h, m, s, action_str, prompt, label, sleep_mode, grace_h, grace_m, grace_s, post_wake, target_win, require_fg, click_btn, click_x_str, click_y_str| {
             let total = compute_seconds(mode, h, m, s);
             if total == 0 {
                 return;
@@ -119,7 +125,11 @@ fn main() -> Result<(), slint::PlatformError> {
             if display_label.is_empty() {
                 display_label = match action {
                     ActionType::Enter    => t("act_enter").to_string(),
-                    ActionType::Click    => t("act_click").to_string(),
+                    ActionType::Click    => match click_btn.as_str() {
+                        "right"  => t("click_right").to_string(),
+                        "double" => t("click_double").to_string(),
+                        _        => t("click_left").to_string(),
+                    },
                     ActionType::Type     => t("act_type").to_string(),
                     ActionType::Sleep    => t("default_sleep_label").to_string(),
                     ActionType::Shutdown => t("default_shutdown_label").to_string(),
@@ -143,11 +153,30 @@ fn main() -> Result<(), slint::PlatformError> {
             }
             item.require_foreground = require_fg;
 
+            item.click_btn = Some(click_btn.to_string());
+            if let (Ok(cx), Ok(cy)) = (click_x_str.parse::<i32>(), click_y_str.parse::<i32>()) {
+                item.click_x = Some(cx);
+                item.click_y = Some(cy);
+            }
+
             let mut s = state.lock().unwrap();
             s.queue.push(item);
 
             if let Some(app) = window_handle.upgrade() {
                 sync_queue_to_ui(&app, &s.queue);
+            }
+        });
+    }
+
+    // Pick Cursor Position (starts 3.0s countdown giving user time to move mouse)
+    {
+        let window_handle = window_handle.clone();
+        let pick_cd = Arc::clone(&pick_countdown_ticks);
+        main_window.on_pick_cursor_position(move || {
+            pick_cd.store(30, Ordering::SeqCst);
+            if let Some(app) = window_handle.upgrade() {
+                let is_en = crate::i18n::get_language_code() == "en";
+                app.set_pick_btn_text(if is_en { "In 3s... (move mouse)" } else { "In 3s... (Maus bewegen)" }.into());
             }
         });
     }
@@ -310,12 +339,100 @@ fn main() -> Result<(), slint::PlatformError> {
         });
     }
 
-    // Periodic Clock Preview Update Timer
+    // Periodic Clock Preview, Cursor Tracker & Global F6 Hotkey Timer (100ms)
     let clock_timer = slint::Timer::default();
     {
         let window_handle = window_handle.clone();
-        clock_timer.start(slint::TimerMode::Repeated, Duration::from_secs(1), move || {
+        let state = Arc::clone(&state);
+        let pick_cd = Arc::clone(&pick_countdown_ticks);
+        let reset_cd = Arc::clone(&reset_btn_ticks);
+        let mut was_f6_pressed = false;
+
+        clock_timer.start(slint::TimerMode::Repeated, Duration::from_millis(100), move || {
             if let Some(app) = window_handle.upgrade() {
+                let (cx, cy) = crate::platform::windows::input::get_cursor_pos();
+                app.set_cursor_pos_text(format!("X: {}  Y: {}", cx, cy).into());
+
+                let is_en = crate::i18n::get_language_code() == "en";
+
+                // Global F6 hotkey detection (works anywhere on screen)
+                let f6_down = unsafe {
+                    (windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState(
+                        windows::Win32::UI::Input::KeyboardAndMouse::VK_F6.0 as i32,
+                    ) as u16 & 0x8000) != 0
+                };
+
+                if f6_down && !was_f6_pressed {
+                    // Cancel countdown if active
+                    pick_cd.store(-1, Ordering::SeqCst);
+
+                    // Capture coordinates
+                    app.set_input_click_x(cx.to_string().into());
+                    app.set_input_click_y(cy.to_string().into());
+                    app.set_click_coords_mode(1);
+
+                    let msg = if is_en {
+                        format!("Position captured with [F6]: X={}, Y={}", cx, cy)
+                    } else {
+                        format!("Position erfasst mit [F6]: X={}, Y={}", cx, cy)
+                    };
+                    let btn_label = if is_en {
+                        format!("Captured: {}, {} [F6]", cx, cy)
+                    } else {
+                        format!("Erfasst: {}, {} [F6]", cx, cy)
+                    };
+                    app.set_pick_btn_text(btn_label.into());
+                    reset_cd.store(20, Ordering::SeqCst); // Reset text after 2s
+
+                    append_log(&window_handle, &state, &msg);
+                }
+                was_f6_pressed = f6_down;
+
+                // Handle 3s countdown if triggered via button
+                let current_cd = pick_cd.load(Ordering::SeqCst);
+                if current_cd > 0 {
+                    let remaining = current_cd - 1;
+                    pick_cd.store(remaining, Ordering::SeqCst);
+
+                    let secs = (remaining + 9) / 10;
+                    let text = if is_en {
+                        format!("In {}s... (move mouse)", secs)
+                    } else {
+                        format!("In {}s... (Maus bewegen)", secs)
+                    };
+                    app.set_pick_btn_text(text.into());
+                } else if current_cd == 0 {
+                    pick_cd.store(-1, Ordering::SeqCst);
+
+                    app.set_input_click_x(cx.to_string().into());
+                    app.set_input_click_y(cy.to_string().into());
+                    app.set_click_coords_mode(1);
+
+                    let msg = if is_en {
+                        format!("Position captured: X={}, Y={}", cx, cy)
+                    } else {
+                        format!("Position erfasst: X={}, Y={}", cx, cy)
+                    };
+                    let btn_label = if is_en {
+                        format!("Captured: {}, {}", cx, cy)
+                    } else {
+                        format!("Erfasst: {}, {}", cx, cy)
+                    };
+                    app.set_pick_btn_text(btn_label.into());
+                    reset_cd.store(20, Ordering::SeqCst);
+
+                    append_log(&window_handle, &state, &msg);
+                }
+
+                // Handle resetting button text back to default
+                let r_cd = reset_cd.load(Ordering::SeqCst);
+                if r_cd > 0 {
+                    reset_cd.store(r_cd - 1, Ordering::SeqCst);
+                } else if r_cd == 0 {
+                    reset_cd.store(-1, Ordering::SeqCst);
+                    app.set_pick_btn_text(t("pick_coords_btn").into());
+                }
+
                 let now = Local::now();
 
                 // Main timer clock preview
@@ -506,6 +623,7 @@ fn main() -> Result<(), slint::PlatformError> {
             if let Some(app) = window_handle.upgrade() {
                 app.set_is_running(false);
                 app.set_status_text("".into());
+                app.set_iteration_badge_text("".into());
                 sync_queue_to_ui(&app, &s.queue);
             }
         });
@@ -524,6 +642,7 @@ fn main() -> Result<(), slint::PlatformError> {
             if let Some(app) = window_handle.upgrade() {
                 app.set_is_running(false);
                 app.set_status_text("".into());
+                app.set_iteration_badge_text("".into());
                 sync_queue_to_ui(&app, &s.queue);
             }
         });
@@ -544,6 +663,7 @@ fn main() -> Result<(), slint::PlatformError> {
             set_language(lang.as_str());
             if let Some(app) = window_handle.upgrade() {
                 app.set_failsafe_text(t("failsafe_tip").into());
+                app.set_pick_btn_text(t("pick_coords_btn").into());
                 let s = state.lock().unwrap();
                 sync_queue_to_ui(&app, &s.queue);
             }
@@ -705,6 +825,18 @@ fn sync_queue_to_ui(app: &AppWindow, queue: &[Item]) {
                     };
                     format!("{} - Type: \"{}\"", fmt_time(item.total), prompt_snippet)
                 }
+                ActionType::Click => {
+                    let btn_label = match item.click_btn.as_deref() {
+                        Some("right") => t("click_right"),
+                        Some("double") => t("click_double"),
+                        _ => t("click_left"),
+                    };
+                    if let (Some(x), Some(y)) = (item.click_x, item.click_y) {
+                        format!("{} - {} (X: {}, Y: {})", fmt_time(item.total), btn_label, x, y)
+                    } else {
+                        format!("{} - {}", fmt_time(item.total), btn_label)
+                    }
+                }
                 _ => format!("{} - {}", fmt_time(item.total), item.action.as_str()),
             };
 
@@ -769,6 +901,23 @@ fn handle_executor_event(
     event: ExecutorEvent,
 ) {
     match event {
+        ExecutorEvent::IterationStart {
+            current_iteration,
+            total_iterations,
+        } => {
+            let mut s = state.lock().unwrap();
+            for item in s.queue.iter_mut() {
+                item.reset();
+            }
+            if total_iterations == 0 {
+                app.set_iteration_badge_text(format!("Loop {} ({})", current_iteration, t("infinite_label")).into());
+            } else if total_iterations > 1 {
+                app.set_iteration_badge_text(format!("Loop {} / {}", current_iteration, total_iterations).into());
+            } else {
+                app.set_iteration_badge_text("".into());
+            }
+            sync_queue_to_ui(app, &s.queue);
+        }
         ExecutorEvent::Tick {
             index,
             rem,
@@ -801,16 +950,19 @@ fn handle_executor_event(
         }
         ExecutorEvent::AllDone { total_items } => {
             app.set_is_running(false);
+            app.set_iteration_badge_text("".into());
             app.set_status_text(format!("Alle {} Aktionen abgeschlossen!", total_items).into());
             let s = state.lock().unwrap();
             sync_queue_to_ui(app, &s.queue);
         }
         ExecutorEvent::Stopped => {
             app.set_is_running(false);
+            app.set_iteration_badge_text("".into());
             app.set_status_text(t("stopped").into());
         }
         ExecutorEvent::Failsafe => {
             app.set_is_running(false);
+            app.set_iteration_badge_text("".into());
             app.set_status_text(t("failsafe_status").into());
         }
         ExecutorEvent::Log(msg) => {
