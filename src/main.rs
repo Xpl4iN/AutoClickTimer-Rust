@@ -1,6 +1,7 @@
 // Disable Windows console window in release builds
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod cli;
 mod executor;
 mod i18n;
 mod models;
@@ -58,6 +59,15 @@ fn compute_seconds(mode: i32, h: i32, m: i32, s: i32) -> u64 {
 }
 
 fn main() -> Result<(), slint::PlatformError> {
+    // ---- Early CLI branch -- must come before any Slint call ----
+    // If command-line arguments are present (and not an elevated GUI relaunch with --pending-item), go headless.
+    {
+        let args: Vec<String> = std::env::args().skip(1).collect();
+        if !args.is_empty() && !args.iter().any(|a| a == "--pending-item") {
+            cli::run_cli(); // -> !
+        }
+    }
+
     let main_window = AppWindow::new()?;
     let window_handle = main_window.as_weak();
 

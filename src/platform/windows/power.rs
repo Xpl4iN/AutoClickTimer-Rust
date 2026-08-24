@@ -9,9 +9,13 @@ use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Local};
 use windows::core::PCWSTR;
-use windows::Win32::Foundation::BOOLEAN;
+use windows::Win32::Foundation::{CloseHandle, BOOLEAN, HANDLE};
 use windows::Win32::System::Power::{
     SetThreadExecutionState, ES_CONTINUOUS, ES_DISPLAY_REQUIRED, ES_SYSTEM_REQUIRED,
+};
+use windows::Win32::System::Threading::{
+    CreateWaitableTimerExW, SetWaitableTimer, CREATE_WAITABLE_TIMER_MANUAL_RESET,
+    TIMER_ALL_ACCESS,
 };
 use windows::Win32::UI::Shell::{IsUserAnAdmin, ShellExecuteW};
 use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
@@ -30,6 +34,36 @@ extern "system" {
 /// Check if current process has Administrator privileges.
 pub fn is_admin() -> bool {
     unsafe { IsUserAnAdmin().as_bool() }
+}
+
+/// Creates and configures a native Win32 RTC waitable timer configured to wake the PC.
+/// Does not require Administrator privileges.
+pub fn create_and_set_wake_timer(total_seconds: u64) -> Result<HANDLE, String> {
+    unsafe {
+        let handle = CreateWaitableTimerExW(
+            None,
+            windows::core::PCWSTR::null(),
+            CREATE_WAITABLE_TIMER_MANUAL_RESET,
+            TIMER_ALL_ACCESS.0,
+        ).map_err(|e| format!("CreateWaitableTimer failed: {}", e))?;
+
+        // 100-nanosecond intervals; negative indicates relative time from now
+        let due_time: i64 = -((total_seconds as i64) * 10_000_000);
+
+        SetWaitableTimer(
+            handle,
+            &due_time,
+            0,
+            None,
+            None,
+            true, // fResume = true: wakes system from suspend
+        ).map_err(|e| {
+            let _ = CloseHandle(handle);
+            format!("SetWaitableTimer failed: {}", e)
+        })?;
+
+        Ok(handle)
+    }
 }
 
 /// Relaunch current executable with UAC Administrator elevation.
@@ -107,21 +141,36 @@ where
     for attempt in 1..=MAX_RETRIES {
         log_fn(&format!("  -> Sleep attempt {}/{}...", attempt, MAX_RETRIES));
 
-        if let Err(e) = configure_power_wake_timers() {
-            log_fn(&format!("  WARNING Power configuration warning: {}", e));
-        }
+        let _ = configure_power_wake_timers();
 
-        let wake_at = Local::now() + chrono::Duration::seconds(total_seconds as i64);
-        if let Err(e) = schedule_wake_task(wake_at) {
-            log_fn(&format!("  WARNING Task schedule failed: {}", e));
-            if attempt < MAX_RETRIES {
-                thread::sleep(RETRY_DELAY);
-                continue;
+        // 1. Set native Win32 RTC waitable wake timer (works without admin privileges)
+        let timer_handle = match create_and_set_wake_timer(total_seconds) {
+            Ok(h) => {
+                log_fn("  -> Native Win32 RTC wake timer programmed.");
+                Some(h)
             }
-            return false;
+            Err(e) => {
+                log_fn(&format!("  WARNING Native wake timer error: {}", e));
+                None
+            }
+        };
+
+        // 2. If elevated, also register scheduled task as backup
+        if is_admin() {
+            let wake_at = Local::now() + chrono::Duration::seconds(total_seconds as i64);
+            if let Err(e) = schedule_wake_task(wake_at) {
+                log_fn(&format!("  WARNING Task schedule failed: {}", e));
+            }
         }
 
         let slept = suspend_and_detect(total_seconds);
+
+        if let Some(h) = timer_handle {
+            unsafe {
+                let _ = CloseHandle(h);
+            }
+        }
+
         if slept {
             log_fn("  -> PC woke successfully.");
             return true;
