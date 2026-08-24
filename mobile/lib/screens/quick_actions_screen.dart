@@ -21,6 +21,25 @@ class _QuickActionsScreenState extends State<QuickActionsScreen> {
   final _promptCtrl = TextEditingController();
 
   @override
+  void initState() {
+    super.initState();
+    _fetchCaffeineStatus();
+  }
+
+  Future<void> _fetchCaffeineStatus() async {
+    final mcp = context.read<McpService>();
+    if (!mcp.isConnected) return;
+    try {
+      final s = await mcp.getStatus();
+      if (mounted && s.containsKey('caffeine_active')) {
+        setState(() {
+          _caffeineActive = s['caffeine_active'] == true;
+        });
+      }
+    } catch (_) {}
+  }
+
+  @override
   void dispose() {
     _promptCtrl.dispose();
     super.dispose();

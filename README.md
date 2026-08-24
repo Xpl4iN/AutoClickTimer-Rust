@@ -20,14 +20,18 @@ AutoClick Timer is a high-performance Windows desktop automation utility written
 - **Profile Persistence:** Compatible JSON profile save/load format (`.act`).
 - **Full CLI & MCP Parity:** Every GUI feature is accessible headlessly from PowerShell/cmd and via MCP tool calls.
 
-## What's New in v1.4.0
+## What's New in v1.5.1
 
-- **Native Model Context Protocol (MCP) Server:** Built-in `stdio` MCP server (`act mcp`) exposing 12 typed tools with 100% GUI parity for AI agents (Claude Desktop, Cursor, Antigravity, etc.).
-- **Multi-Iteration Looping:** Run queues $N$ times or loop infinitely ($\infty$) across GUI, CLI (`--repeat <N>`), and MCP (`repeat_count`).
-- **Visual & Programmatic Queue Reordering:** Move steps up and down in the GUI (`▲`/`▼`), reorder via CLI (`act reorder`), or reorder via MCP (`act_reorder_queue`).
-- **Screen & Window Inspection:** Query cursor coordinates and window bounding boxes across CLI (`act get-cursor`, `act get-window`) and MCP (`act_get_cursor_pos`, `act_get_window_rect`).
-- **Zero-Admin RTC Sleep & Wake:** Completely removed mandatory UAC elevation prompts for scheduled sleep/wake. Arms hardware RTC wake timers via Win32 user-mode APIs (`CreateWaitableTimerExW` with `fResume=true`).
-- **Password-Safe Windows Automation:** Support for background window-targeted message injection (`PostMessageW`/`SendMessageW`) while workstation is locked, plus zero-password wake configuration (`act configure-wake-lock`).
+- **Embedded TCP MCP Server in GUI:** The desktop GUI application automatically starts the background TCP MCP server on port `7890` at startup. No manual console launcher is required to use the mobile remote.
+- **Real-Time Bi-Directional GUI Sync:** Mobile actions (toggling Caffeine, scheduling queues, executing single actions, cancelling) immediately update the desktop UI in real time (flipping toggles, showing queue items, rendering live countdowns, and streaming logs).
+- **Desktop-Attached Cursor Resolution:** Fixed cursor coordinate query returning `(0, 0)` from background worker threads by introducing automatic interactive desktop input attachment (`OpenInputDesktop` + `SetThreadDesktop`) and multi-level DPI-aware fallbacks.
+- **Live Caffeine State Telemetry:** `act_get_status` now exposes `caffeine_active` boolean state for instant mobile UI sync.
+
+## What's New in v1.5.0
+
+- **Tailscale Mobile Remote App (APK):** Complete Android companion app to control your Windows PC securely over Tailscale.
+- **Remote Lockout Safeguards:** 2-step confirmation and safety checks before remote system suspend or shutdown.
+- **Visual Action Grid & Queue Builder:** Mobile queue construction with sleep presets and hardware RTC wake timers.
 
 ## Action Types
 
@@ -79,9 +83,9 @@ The companion **AutoClick Remote** Flutter app (`mobile/`) connects to the TCP M
 - **Settings** -- cursor position, passwordless wake config, disconnect
 
 **Setup:**
-1. Run `act mcp --tcp-port 7890 --api-key <secret>` on your PC
+1. Open AutoClick Timer (`autoclicktimer.exe`) on your PC (or run headless via `act mcp --tcp-port 7890 --api-key <secret>`)
 2. Make sure both devices are on the same Tailscale network
-3. Open AutoClick Remote, enter your PC's Tailscale IP, port `7890`, and API key
+3. Open AutoClick Remote on your phone, enter your PC's Tailscale IP, port `7890` (and API key if configured)
 4. Tap Connect
 
 ### MCP Configuration Example (Claude Desktop / Cursor / Antigravity)

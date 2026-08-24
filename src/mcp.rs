@@ -65,14 +65,43 @@ struct JsonRpcError {
     data: Option<Value>,
 }
 
+#[derive(Debug, Clone)]
+pub enum McpGuiEvent {
+    CaffeineToggled(bool),
+    QueueScheduled {
+        items: Vec<Item>,
+        scheduled_start: Option<DateTime<Local>>,
+        repeat_count: u32,
+    },
+    ActionExecuted {
+        item: Item,
+        repeat_count: u32,
+    },
+    QueueCancelled,
+    Executor(crate::executor::ExecutorEvent),
+    LogMessage(String),
+}
+
 pub struct McpServer {
     executor: Arc<Mutex<QueueExecutor>>,
+    gui_sink: Option<Arc<dyn Fn(McpGuiEvent) + Send + Sync>>,
 }
 
 impl McpServer {
     pub fn new() -> Self {
         Self {
             executor: Arc::new(Mutex::new(QueueExecutor::new())),
+            gui_sink: None,
+        }
+    }
+
+    pub fn with_shared(
+        executor: Arc<Mutex<QueueExecutor>>,
+        gui_sink: Option<Arc<dyn Fn(McpGuiEvent) + Send + Sync>>,
+    ) -> Self {
+        Self {
+            executor,
+            gui_sink,
         }
     }
 
@@ -330,6 +359,13 @@ impl McpServer {
 
         let async_exec = args.get("async_execution").and_then(|v| v.as_bool()).unwrap_or(true);
 
+        if let Some(sink) = &self.gui_sink {
+            sink(McpGuiEvent::ActionExecuted {
+                item: item.clone(),
+                repeat_count: repeat,
+            });
+        }
+
         self.start_queue(vec![item], scheduled_start, repeat, async_exec)
     }
 
@@ -403,6 +439,14 @@ impl McpServer {
 
         let async_exec = args.get("async_execution").and_then(|v| v.as_bool()).unwrap_or(true);
 
+        if let Some(sink) = &self.gui_sink {
+            sink(McpGuiEvent::QueueScheduled {
+                items: queue.clone(),
+                scheduled_start,
+                repeat_count: repeat,
+            });
+        }
+
         self.start_queue(queue, scheduled_start, repeat, async_exec)
     }
 
@@ -422,6 +466,14 @@ impl McpServer {
         let scheduled_start = resolve_start_time(start_in, start_at)?;
 
         let async_exec = args.get("async_execution").and_then(|v| v.as_bool()).unwrap_or(true);
+
+        if let Some(sink) = &self.gui_sink {
+            sink(McpGuiEvent::QueueScheduled {
+                items: queue.clone(),
+                scheduled_start,
+                repeat_count: repeat,
+            });
+        }
 
         self.start_queue(queue, scheduled_start, repeat, async_exec)
     }
@@ -482,13 +534,20 @@ impl McpServer {
 
     fn tool_get_status(&self) -> Result<Value, String> {
         let snapshot = self.executor.lock().unwrap().get_snapshot();
-        serde_json::to_value(&snapshot).map_err(|e| e.to_string())
+        let mut val = serde_json::to_value(&snapshot).map_err(|e| e.to_string())?;
+        if let Value::Object(ref mut map) = val {
+            map.insert("caffeine_active".to_string(), json!(crate::platform::windows::power::is_caffeine_active()));
+        }
+        Ok(val)
     }
 
     fn tool_cancel(&self) -> Result<Value, String> {
         let executor = self.executor.lock().unwrap();
         executor.stop();
         let snapshot = executor.get_snapshot();
+        if let Some(sink) = &self.gui_sink {
+            sink(McpGuiEvent::QueueCancelled);
+        }
         Ok(json!({
             "status": "cancelled",
             "message": "Active queue or timer was stopped.",
@@ -510,12 +569,20 @@ impl McpServer {
 
         set_caffeine(active);
 
+        if let Some(sink) = &self.gui_sink {
+            sink(McpGuiEvent::CaffeineToggled(active));
+        }
+
         if active {
             if let Some(secs) = duration_secs {
                 if secs > 0 {
+                    let sink_opt = self.gui_sink.clone();
                     std::thread::spawn(move || {
                         std::thread::sleep(Duration::from_secs(secs));
                         set_caffeine(false);
+                        if let Some(sink) = sink_opt {
+                            sink(McpGuiEvent::CaffeineToggled(false));
+                        }
                     });
                     return Ok(json!({
                         "active": true,
@@ -563,8 +630,11 @@ impl McpServer {
         let item_count = queue.len();
         let total_duration_secs: u64 = queue.iter().map(|it| it.total).sum();
 
-        executor.start(queue, start_at, repeat, |_event| {
-            // Background event sink
+        let gui_sink_clone = self.gui_sink.clone();
+        executor.start(queue, start_at, repeat, move |event| {
+            if let Some(sink) = &gui_sink_clone {
+                sink(McpGuiEvent::Executor(event));
+            }
         });
 
         let initial_snapshot = executor.get_snapshot();
@@ -594,6 +664,33 @@ impl McpServer {
             }
         }
     }
+}
+
+/// Start TCP listener in a background thread for the GUI application.
+/// Non-blocking, returns immediately.
+pub fn start_gui_mcp_server(
+    port: u16,
+    api_key: Option<String>,
+    executor: Arc<Mutex<QueueExecutor>>,
+    gui_sink: Option<Arc<dyn Fn(McpGuiEvent) + Send + Sync>>,
+) {
+    let server = Arc::new(McpServer::with_shared(executor, gui_sink));
+    let _ = std::thread::Builder::new()
+        .name("mcp-tcp-listener".to_string())
+        .spawn(move || {
+            let rt = match tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("[MCP-TCP] Failed to build Tokio runtime: {}", e);
+                    return;
+                }
+            };
+            rt.block_on(run_tcp_listener(server, port, api_key));
+        });
 }
 
 fn success_response(id: Option<Value>, result: Value) -> JsonRpcResponse {
@@ -720,11 +817,18 @@ async fn handle_tcp_client(
     let mut line = String::new();
     let mut authenticated = api_key.is_none(); // no key required = pre-authenticated
 
+    if let Some(sink) = &server.gui_sink {
+        sink(McpGuiEvent::LogMessage(format!("Remote Client verbunden: {}", peer)));
+    }
+
     loop {
         line.clear();
         match reader.read_line(&mut line).await {
             Ok(0) => {
                 eprintln!("[MCP-TCP] Client disconnected: {}", peer);
+                if let Some(sink) = &server.gui_sink {
+                    sink(McpGuiEvent::LogMessage(format!("Remote Client getrennt: {}", peer)));
+                }
                 break;
             }
             Err(e) => {
@@ -1359,6 +1463,70 @@ mod tests {
         assert_eq!(result["isError"], false);
         let text = result["content"][0]["text"].as_str().unwrap();
         assert!(text.contains("\"status\": \"validated\""));
+    }
+
+    #[test]
+    fn test_mcp_gui_sink_and_caffeine_sync() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let events_clone = Arc::clone(&events);
+        let executor = Arc::new(Mutex::new(QueueExecutor::new()));
+
+        let server = McpServer::with_shared(
+            executor,
+            Some(Arc::new(move |ev| {
+                events_clone.lock().unwrap().push(ev);
+            })),
+        );
+
+        // Toggle caffeine on
+        let req = JsonRpcRequest {
+            jsonrpc: Some("2.0".to_string()),
+            id: Some(json!(10)),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "act_set_caffeine",
+                "arguments": { "active": true }
+            })),
+        };
+        let resp = server.handle_request(req).unwrap();
+        assert_eq!(resp.result.unwrap()["isError"], false);
+
+        // Verify GUI sink received CaffeineToggled(true)
+        {
+            let recorded = events.lock().unwrap();
+            assert_eq!(recorded.len(), 1);
+            match &recorded[0] {
+                McpGuiEvent::CaffeineToggled(active) => assert_eq!(*active, true),
+                _ => panic!("Expected CaffeineToggled event"),
+            }
+        }
+
+        // Verify act_get_status contains caffeine_active: true
+        let status_req = JsonRpcRequest {
+            jsonrpc: Some("2.0".to_string()),
+            id: Some(json!(11)),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "act_get_status",
+                "arguments": {}
+            })),
+        };
+        let status_resp = server.handle_request(status_req).unwrap();
+        let status_text = status_resp.result.unwrap()["content"][0]["text"].as_str().unwrap().to_string();
+        assert!(status_text.contains("\"caffeine_active\": true"));
+
+        // Toggle caffeine off
+        let req_off = JsonRpcRequest {
+            jsonrpc: Some("2.0".to_string()),
+            id: Some(json!(12)),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "act_set_caffeine",
+                "arguments": { "active": false }
+            })),
+        };
+        let _ = server.handle_request(req_off).unwrap();
+        assert_eq!(events.lock().unwrap().len(), 2);
     }
 }
 

@@ -122,8 +122,13 @@ pub fn request_elevation() -> Result<(), String> {
     request_elevation_with_pending(None)
 }
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
+static CAFFEINE_ACTIVE: AtomicBool = AtomicBool::new(false);
+
 /// Enable or disable native Windows Caffeine keep-awake.
 pub fn set_caffeine(active: bool) {
+    CAFFEINE_ACTIVE.store(active, Ordering::SeqCst);
     unsafe {
         if active {
             SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED);
@@ -131,6 +136,11 @@ pub fn set_caffeine(active: bool) {
             SetThreadExecutionState(ES_CONTINUOUS);
         }
     }
+}
+
+/// Check if Caffeine mode is currently active.
+pub fn is_caffeine_active() -> bool {
+    CAFFEINE_ACTIVE.load(Ordering::SeqCst)
 }
 
 /// Execute sleep sequence with retries, wake scheduling, and suspend detection.

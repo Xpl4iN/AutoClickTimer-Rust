@@ -20,6 +20,7 @@ use slint::{Color, ModelRc, VecModel};
 
 use crate::executor::{ExecutorEvent, QueueExecutor};
 use crate::i18n::{fmt_time, set_language, t};
+use crate::mcp::{start_gui_mcp_server, McpGuiEvent};
 use crate::models::{ActionType, Item, ItemPhase, ItemStatus, SleepConfig};
 use crate::platform::windows::input::get_open_windows;
 use crate::platform::windows::power::set_caffeine;
@@ -105,6 +106,89 @@ fn main() -> Result<(), slint::PlatformError> {
                 }
             }
         }
+    }
+
+    // ---- Launch Embedded MCP TCP Server (Port 7890) for Mobile Remote & AI ----
+    {
+        let handle = window_handle.clone();
+        let state_clone = Arc::clone(&state);
+        let executor_clone = Arc::clone(&executor);
+
+        let gui_sink = Arc::new(move |event: McpGuiEvent| {
+            let handle = handle.clone();
+            let state_clone = Arc::clone(&state_clone);
+
+            let _ = slint::invoke_from_event_loop(move || {
+                if let Some(app) = handle.upgrade() {
+                    match event {
+                        McpGuiEvent::CaffeineToggled(active) => {
+                            app.set_caffeine_active(active);
+                            let msg = if active {
+                                t("log_caffeine_on").to_string()
+                            } else {
+                                t("log_caffeine_off").to_string()
+                            };
+                            append_log(&handle, &state_clone, &format!("[Remote] {}", msg));
+                        }
+                        McpGuiEvent::QueueScheduled { items, scheduled_start, repeat_count } => {
+                            {
+                                let mut s = state_clone.lock().unwrap();
+                                s.queue = items.clone();
+                            }
+                            let s = state_clone.lock().unwrap();
+                            sync_queue_to_ui(&app, &s.queue);
+                            app.set_is_running(true);
+                            if repeat_count > 1 {
+                                app.set_iteration_badge_text(format!("Loop 1 / {}", repeat_count).into());
+                            } else if repeat_count == 0 {
+                                app.set_iteration_badge_text(format!("Loop 1 ({})", t("infinite_label")).into());
+                            } else {
+                                app.set_iteration_badge_text("".into());
+                            }
+                            if let Some(start_dt) = scheduled_start {
+                                app.set_status_text(format!("Geplant für {}", start_dt.format("%H:%M:%S")).into());
+                                append_log(&handle, &state_clone, &format!("[Remote] Warteschlange geplant für {} ({} Schritte)", start_dt.format("%H:%M:%S"), items.len()));
+                            } else {
+                                app.set_status_text(t("status_running").into());
+                                append_log(&handle, &state_clone, &format!("[Remote] Warteschlange gestartet ({} Schritte)", items.len()));
+                            }
+                        }
+                        McpGuiEvent::ActionExecuted { item, repeat_count } => {
+                            {
+                                let mut s = state_clone.lock().unwrap();
+                                s.queue = vec![item.clone()];
+                            }
+                            let s = state_clone.lock().unwrap();
+                            sync_queue_to_ui(&app, &s.queue);
+                            app.set_is_running(true);
+                            if repeat_count > 1 {
+                                app.set_iteration_badge_text(format!("Loop 1 / {}", repeat_count).into());
+                            } else if repeat_count == 0 {
+                                app.set_iteration_badge_text(format!("Loop 1 ({})", t("infinite_label")).into());
+                            } else {
+                                app.set_iteration_badge_text("".into());
+                            }
+                            app.set_status_text(t("status_running").into());
+                            append_log(&handle, &state_clone, &format!("[Remote] Aktion ausgeführt: {} ({}s)", item.label, item.total));
+                        }
+                        McpGuiEvent::QueueCancelled => {
+                            app.set_is_running(false);
+                            app.set_status_text(t("stopped").into());
+                            app.set_iteration_badge_text("".into());
+                            append_log(&handle, &state_clone, "[Remote] Gestoppt über Fernsteuerung.");
+                        }
+                        McpGuiEvent::Executor(exec_ev) => {
+                            handle_executor_event(&app, &state_clone, exec_ev);
+                        }
+                        McpGuiEvent::LogMessage(msg) => {
+                            append_log(&handle, &state_clone, &format!("[Remote] {}", msg));
+                        }
+                    }
+                }
+            });
+        });
+
+        start_gui_mcp_server(7890, None, executor_clone, Some(gui_sink));
     }
 
     // ---- Event Callbacks ----
@@ -650,8 +734,16 @@ fn main() -> Result<(), slint::PlatformError> {
 
     // Toggle Caffeine
     {
+        let window_handle = window_handle.clone();
+        let state = Arc::clone(&state);
         main_window.on_toggle_caffeine(move |active| {
             set_caffeine(active);
+            let msg = if active {
+                t("log_caffeine_on").to_string()
+            } else {
+                t("log_caffeine_off").to_string()
+            };
+            append_log(&window_handle, &state, &msg);
         });
     }
 

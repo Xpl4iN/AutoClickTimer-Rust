@@ -21,11 +21,48 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WM_LBUTTONUP,
 };
 
+#[link(name = "user32")]
+extern "system" {
+    fn OpenInputDesktop(dwFlags: u32, fInherit: BOOL, dwDesiredAccess: u32) -> windows::Win32::Foundation::HANDLE;
+    fn SetThreadDesktop(hDesktop: windows::Win32::Foundation::HANDLE) -> BOOL;
+    fn CloseDesktop(hDesktop: windows::Win32::Foundation::HANDLE) -> BOOL;
+}
+
 /// Get current mouse cursor screen coordinates (X, Y).
 pub fn get_cursor_pos() -> (i32, i32) {
     unsafe {
         let mut pt = POINT::default();
-        let _ = GetCursorPos(&mut pt);
+        if GetCursorPos(&mut pt).is_ok() {
+            return (pt.x, pt.y);
+        }
+
+        // If direct GetCursorPos failed (e.g. Access Denied when running from worker thread),
+        // attach thread to the interactive input desktop:
+        const DESKTOP_READOBJECTS: u32 = 0x0001;
+        const DESKTOP_WRITEOBJECTS: u32 = 0x0080;
+        let desktop = OpenInputDesktop(0, BOOL(0), DESKTOP_READOBJECTS | DESKTOP_WRITEOBJECTS);
+        if !desktop.is_invalid() && desktop.0 != std::ptr::null_mut() {
+            let _ = SetThreadDesktop(desktop);
+            let _ = CloseDesktop(desktop);
+            if GetCursorPos(&mut pt).is_ok() {
+                return (pt.x, pt.y);
+            }
+        }
+
+        // Fallback 1: GetPhysicalCursorPos
+        if windows::Win32::UI::WindowsAndMessaging::GetPhysicalCursorPos(&mut pt).is_ok() {
+            return (pt.x, pt.y);
+        }
+
+        // Fallback 2: GetCursorInfo
+        let mut ci = windows::Win32::UI::WindowsAndMessaging::CURSORINFO {
+            cbSize: std::mem::size_of::<windows::Win32::UI::WindowsAndMessaging::CURSORINFO>() as u32,
+            ..Default::default()
+        };
+        if windows::Win32::UI::WindowsAndMessaging::GetCursorInfo(&mut ci).is_ok() {
+            return (ci.ptScreenPos.x, ci.ptScreenPos.y);
+        }
+
         (pt.x, pt.y)
     }
 }
