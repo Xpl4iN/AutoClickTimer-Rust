@@ -4,6 +4,7 @@
 mod cli;
 mod executor;
 mod i18n;
+mod mcp;
 mod models;
 mod platform;
 mod updater;
@@ -20,7 +21,7 @@ use crate::executor::{ExecutorEvent, QueueExecutor};
 use crate::i18n::{fmt_time, set_language, t};
 use crate::models::{ActionType, Item, ItemPhase, ItemStatus, SleepConfig};
 use crate::platform::windows::input::get_open_windows;
-use crate::platform::windows::power::{is_admin, request_elevation_with_pending, set_caffeine};
+use crate::platform::windows::power::set_caffeine;
 use crate::updater::{check_for_update, download_and_apply, UpdateInfo, CURRENT_VERSION, REPO};
 
 slint::include_modules!();
@@ -114,22 +115,6 @@ fn main() -> Result<(), slint::PlatformError> {
 
             let action = ActionType::from_str_loose(action_str.as_str());
 
-            if action == ActionType::Sleep && !is_admin() {
-                // Build a pending item from the current form state, serialize as
-                // base64 JSON, and pass it to the elevated instance so it lands
-                // directly in the queue after UAC consent.
-                let pending = build_pending_item(
-                    mode, h, m, s, &action_str, &prompt, &label,
-                    sleep_mode, grace_h, grace_m, grace_s, post_wake,
-                    &target_win, require_fg,
-                );
-                let b64 = pending.map(|item| item_to_b64(&item));
-                if let Err(e) = request_elevation_with_pending(b64.as_deref()) {
-                    eprintln!("Elevation error: {}", e);
-                }
-                return;
-            }
-
             let mut display_label = label.to_string();
             if display_label.is_empty() {
                 display_label = match action {
@@ -185,17 +170,6 @@ fn main() -> Result<(), slint::PlatformError> {
                     s.queue.push(item);
                 }
                 "enter" | "click" => {
-                    if !is_admin() {
-                        // For presets, build a minimal Sleep item as the pending payload;
-                        // the elevated instance will add the full preset chain itself.
-                        let mut sleep_item = Item::new(duration, ActionType::Sleep);
-                        sleep_item.label = t("default_sleep_label").to_string();
-                        sleep_item.sleep_cfg = SleepConfig { pre_sleep_grace: 5, post_wake_delay: 30 };
-                        let b64 = item_to_b64(&sleep_item);
-                        let _ = request_elevation_with_pending(Some(&b64));
-                        return;
-                    }
-
                     let mut sleep_item = Item::new(duration, ActionType::Sleep);
                     sleep_item.label = t("default_sleep_label").to_string();
                     sleep_item.sleep_cfg = SleepConfig {
@@ -831,32 +805,9 @@ fn handle_executor_event(
 }
 
 // ---------------------------------------------------------------------------
-// Elevation helpers -- serialize / deserialize a pending Item via base64 JSON
+// Helpers
 // ---------------------------------------------------------------------------
 
-/// Serialize an `Item` to a URL-safe base64 string (standard alphabet, no padding stripped).
-fn item_to_b64(item: &Item) -> String {
-    let json = serde_json::to_vec(item).unwrap_or_default();
-    base64_encode(&json)
-}
-
-/// Standard base64 encoder (A-Z a-z 0-9 + /).
-fn base64_encode(data: &[u8]) -> String {
-    const CHARSET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::new();
-    for chunk in data.chunks(3) {
-        let b0 = chunk[0];
-        let b1 = if chunk.len() > 1 { chunk[1] } else { 0 };
-        let b2 = if chunk.len() > 2 { chunk[2] } else { 0 };
-        out.push(CHARSET[(b0 >> 2) as usize] as char);
-        out.push(CHARSET[(((b0 & 0x03) << 4) | (b1 >> 4)) as usize] as char);
-        out.push(if chunk.len() > 1 { CHARSET[(((b1 & 0x0F) << 2) | (b2 >> 6)) as usize] as char } else { '=' });
-        out.push(if chunk.len() > 2 { CHARSET[(b2 & 0x3F) as usize] as char } else { '=' });
-    }
-    out
-}
-
-/// Standard base64 decoder.
 fn base64_decode(s: &str) -> Result<Vec<u8>, String> {
     fn val(c: u8) -> Result<u8, String> {
         match c {
@@ -884,51 +835,6 @@ fn base64_decode(s: &str) -> Result<Vec<u8>, String> {
         if chunk[3] != b'=' { out.push((v2 << 6) | v3); }
     }
     Ok(out)
-}
-
-/// Build an `Item` from the raw form parameters (mirrors the `on_add_item` logic).
-/// Returns `None` if the computed duration is zero.
-#[allow(clippy::too_many_arguments)]
-fn build_pending_item(
-    mode: i32, h: i32, m: i32, s: i32,
-    action_str: &slint::SharedString,
-    prompt: &slint::SharedString,
-    label: &slint::SharedString,
-    sleep_mode: i32, grace_h: i32, grace_m: i32, grace_s: i32,
-    post_wake: i32,
-    target_win: &slint::SharedString,
-    require_fg: bool,
-) -> Option<Item> {
-    let total = compute_seconds(mode, h, m, s);
-    if total == 0 {
-        return None;
-    }
-    let action = ActionType::from_str_loose(action_str.as_str());
-    let mut display_label = label.to_string();
-    if display_label.is_empty() {
-        display_label = match action {
-            ActionType::Enter    => t("act_enter").to_string(),
-            ActionType::Click    => t("act_click").to_string(),
-            ActionType::Type     => t("act_type").to_string(),
-            ActionType::Sleep    => t("default_sleep_label").to_string(),
-            ActionType::Shutdown => t("default_shutdown_label").to_string(),
-            ActionType::Caffeine => t("p4_title").to_string(),
-        };
-    }
-    let grace_total = compute_seconds(sleep_mode, grace_h, grace_m, grace_s);
-    let mut item = Item::new(total, action);
-    item.prompt = prompt.to_string();
-    item.label  = display_label;
-    item.sleep_cfg = SleepConfig {
-        pre_sleep_grace: grace_total,
-        post_wake_delay: post_wake.max(0) as u64,
-    };
-    let win_str = target_win.to_string();
-    if win_str != "(Global / Aktives Fenster)" && win_str != "(Global / Active Window)" {
-        item.target_window = win_str;
-    }
-    item.require_foreground = require_fg;
-    Some(item)
 }
 
 fn append_log(

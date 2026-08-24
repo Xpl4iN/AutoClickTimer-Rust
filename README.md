@@ -1,31 +1,31 @@
-﻿# AutoClick Timer (Rust Native Edition)
+# AutoClick Timer (Rust Native Edition)
 
-AutoClick Timer is a high-performance Windows desktop automation utility written in pure Rust with Slint and native Win32 APIs. It ships as a **single standalone `.exe`** with both a GUI and a full headless CLI -- no installation required.
+AutoClick Timer is a high-performance Windows desktop automation utility written in pure Rust with Slint and native Win32 APIs. It ships as a **single standalone `.exe`** with a modern GUI, a full headless CLI, and a native Model Context Protocol (MCP) server for AI agents -- no installation required.
 
 ## Highlights & Performance
 
 - **Ultra-Lightweight:** Single standalone `.exe` (~10 MB), consuming < 18 MB RAM (75% lower than Python/Tkinter).
 - **Instant Launch:** Zero extraction delay, sub-30 ms cold startup.
 - **Pure Native Execution:** Powered by Slint with hardware-accelerated rendering (DirectX / software fallback). Zero WebView2 / Chromium dependencies.
-- **On-Demand Elevation (`asInvoker`):** Launches without UAC prompts. Administrator elevation is requested only when configuring SYSTEM-level RTC wake tasks.
-- **UAC Queue Restoration:** When elevation is requested, the pending queue item (including all configured parameters) is automatically serialized and restored in the elevated instance.
+- **Zero-Admin RTC Sleep & Wake (`asInvoker`):** Native user-mode Win32 waitable wake timers (`CreateWaitableTimerExW` with `fResume=true`) and suspend (`Powrprof.dll`) operate completely without administrator elevation or UAC prompts.
+- **Password-Safe Windows Automation:**
+  - Background Win32 `PostMessageW` / `SendMessageW` targeting specific window handles without stealing focus, functioning even when the machine is locked.
+  - Optional zero-password wake configuration (`act configure-wake-lock`) allowing the machine to wake directly to the unlocked desktop without password prompts.
 - **Native OS Automation:**
-  - Direct Win32 `SendInput` and background `PostMessageW` / `SendMessageW` targeting specific window handles without stealing focus.
+  - Direct Win32 `SendInput` and background window message injection.
   - Native Windows Power Management (`SetThreadExecutionState` for Caffeine keep-awake, `Powrprof.dll` for `SetSuspendState`, RTC wake timers).
   - Emergency Mouse Failsafe: instant abort when mouse reaches coordinate (0, 0).
+- **Native MCP Server:** Built-in Model Context Protocol (MCP) server over `stdio` (`act mcp`) for direct integration with AI agents (Claude Desktop, Cursor, Antigravity, etc.).
 - **Internationalization:** Runtime language toggle between German (DE) and English (EN).
 - **Profile Persistence:** Compatible JSON profile save/load format (`.act`).
-- **Full CLI:** Every GUI feature is accessible headlessly from PowerShell or cmd.
+- **Full CLI & MCP Parity:** Every GUI feature is accessible headlessly from PowerShell/cmd and via MCP tool calls.
 
-## What's New in v1.3.2
+## What's New in v1.4.0
 
-- **Headless CLI mode** -- all GUI actions accessible without opening a window.
-- `queue` subcommand -- build multi-step queues directly from the shell.
-- `caffeine` subcommand -- standalone keep-awake without opening the GUI.
-- `list-windows` -- enumerate open window titles for use with `--window`.
-- `check-update --apply` -- check for and install updates from the CLI.
-- `--in <delay>` and `--start-at <HH:MM:SS>` on all execution subcommands.
-- `--foreground` flag on `add` to bring target window to front before acting.
+- **Native Model Context Protocol (MCP) Server:** Built-in `stdio` MCP server (`act mcp`) exposing 9 typed tools with 100% GUI parity for AI agents (Claude Desktop, Cursor, Antigravity, etc.).
+- **Zero-Admin RTC Sleep & Wake:** Completely removed mandatory UAC elevation prompts for scheduled sleep/wake. Arms hardware RTC wake timers via Win32 user-mode APIs (`CreateWaitableTimerExW` with `fResume=true`).
+- **Password-Safe Windows Automation:** Support for background window-targeted message injection (`PostMessageW`/`SendMessageW`) while workstation is locked, plus zero-password wake configuration (`act configure-wake-lock`).
+- **Real-Time Asynchronous Queue Control:** Real-time state query (`act_get_status`) and cancellation (`act_cancel`) tools for headless agent orchestration.
 
 ## Action Types
 
@@ -34,9 +34,48 @@ AutoClick Timer is a high-performance Windows desktop automation utility written
 | `enter` | Press Enter key after countdown | No |
 | `click` | Left mouse click after countdown | No |
 | `type` | Type text string after countdown | No |
-| `sleep` | Suspend PC via RTC wake timer | **Yes** |
+| `sleep` | Suspend PC via Win32 RTC wake timer | No |
 | `shutdown` | System shutdown after countdown | No |
 | `caffeine` | Keep screen awake for set duration | No |
+
+---
+
+## Model Context Protocol (MCP) for AI Agents
+
+AutoClick Timer embeds a complete MCP `stdio` server directly into the binary. AI agents can use all desktop automation features through structured JSON tool calls without shell escaping issues.
+
+### Starting the MCP Server
+
+```powershell
+act mcp
+```
+
+### MCP Configuration Example (Claude Desktop / Cursor / Antigravity)
+
+```json
+{
+  "mcpServers": {
+    "autoclicktimer": {
+      "command": "C:\\path\\to\\autoclicktimer.exe",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+### Available MCP Tools
+
+| Tool | Description | Parameters |
+|---|---|---|
+| `act_execute_action` | Execute a single action immediately or after countdown | `action`, `after`, `label`, `prompt`, `window`, `foreground`, `pre_sleep_grace`, `post_wake_delay`, `start_in`, `start_at`, `async_execution` |
+| `act_schedule_queue` | Build and execute a multi-step queue | `steps` (array of step objects), `save_profile_path`, `start_in`, `start_at`, `async_execution` |
+| `act_run_profile` | Execute a saved `.act` profile headlessly | `profile_path`, `start_in`, `start_at`, `async_execution` |
+| `act_save_profile` | Validate and save steps to a `.act` profile file | `profile_path`, `steps` |
+| `act_get_status` | Query active queue progress, remaining seconds, and phase in real time | (none) |
+| `act_cancel` | Immediately cancel active timer or queue | (none) |
+| `act_list_windows` | Enumerate visible window titles for window-specific targeting | (none) |
+| `act_set_caffeine` | Direct toggle of screen/sleep keep-awake mode | `active`, `duration_seconds` |
+| `act_configure_passwordless_wake` | Configure user session to wake directly without password lock | (none) |
 
 ---
 

@@ -3,14 +3,14 @@
 //! action retries, failsafe monitoring, and thread-safe callbacks.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Local};
 
 use crate::i18n::fmt_time;
-use crate::models::{ActionType, Item, ItemPhase, ItemStatus};
+use crate::models::{ActionType, Item, ItemPhase, ItemStatus, QueueItemSummary, QueueSnapshot};
 use crate::platform::windows::failsafe::is_failsafe_triggered;
 use crate::platform::windows::input::{
     execute_with_foreground, find_window_by_title, post_click_to_hwnd, post_enter_to_hwnd,
@@ -49,6 +49,7 @@ pub enum ExecutorEvent {
 
 pub struct QueueExecutor {
     stop_flag: Arc<AtomicBool>,
+    snapshot: Arc<Mutex<QueueSnapshot>>,
     worker_handle: Option<JoinHandle<()>>,
 }
 
@@ -56,6 +57,7 @@ impl QueueExecutor {
     pub fn new() -> Self {
         Self {
             stop_flag: Arc::new(AtomicBool::new(false)),
+            snapshot: Arc::new(Mutex::new(QueueSnapshot::default())),
             worker_handle: None,
         }
     }
@@ -66,6 +68,10 @@ impl QueueExecutor {
         } else {
             false
         }
+    }
+
+    pub fn get_snapshot(&self) -> QueueSnapshot {
+        self.snapshot.lock().unwrap().clone()
     }
 
     pub fn start<F>(
@@ -82,9 +88,10 @@ impl QueueExecutor {
 
         self.stop_flag.store(false, Ordering::SeqCst);
         let stop_flag = Arc::clone(&self.stop_flag);
+        let snapshot = Arc::clone(&self.snapshot);
 
         let handle = thread::spawn(move || {
-            run_worker(queue, start_at, stop_flag, event_sink);
+            run_worker(queue, start_at, stop_flag, snapshot, event_sink);
         });
 
         self.worker_handle = Some(handle);
@@ -92,6 +99,10 @@ impl QueueExecutor {
 
     pub fn stop(&self) {
         self.stop_flag.store(true, Ordering::SeqCst);
+        if let Ok(mut snap) = self.snapshot.lock() {
+            snap.is_running = false;
+            snap.status = "stopped".to_string();
+        }
     }
 }
 
@@ -99,18 +110,61 @@ fn run_worker<F>(
     mut queue: Vec<Item>,
     start_at: Option<DateTime<Local>>,
     stop_flag: Arc<AtomicBool>,
+    snapshot: Arc<Mutex<QueueSnapshot>>,
     event_sink: F,
 ) where
     F: Fn(ExecutorEvent) + Send + Sync + 'static,
 {
+    let total_items = queue.len();
+
+    // Initialize snapshot
+    {
+        let items_summary: Vec<QueueItemSummary> = queue
+            .iter()
+            .enumerate()
+            .map(|(idx, it)| QueueItemSummary {
+                index: idx,
+                label: it.label.clone(),
+                action: it.action.as_str().to_string(),
+                total_seconds: it.total,
+                target_window: it.target_window.clone(),
+                status: it.status.as_str().to_string(),
+            })
+            .collect();
+
+        if let Ok(mut snap) = snapshot.lock() {
+            snap.is_running = true;
+            snap.status = if start_at.is_some() { "scheduled".to_string() } else { "running".to_string() };
+            snap.total_items = total_items;
+            snap.current_index = 0;
+            snap.items = items_summary;
+            if let Some(first) = queue.first() {
+                snap.current_action = first.action.as_str().to_string();
+                snap.current_label = first.label.clone();
+                snap.target_window = first.target_window.clone();
+                snap.remaining_seconds = first.total;
+                snap.phase = String::new();
+                snap.phase_total = first.total;
+            }
+        }
+    }
+
     // Wait for scheduled start time if provided
     if let Some(target_time) = start_at {
         while Local::now() < target_time {
             if stop_flag.load(Ordering::SeqCst) {
+                if let Ok(mut snap) = snapshot.lock() {
+                    snap.is_running = false;
+                    snap.status = "stopped".to_string();
+                }
                 event_sink(ExecutorEvent::Stopped);
                 return;
             }
             if is_failsafe_triggered() {
+                if let Ok(mut snap) = snapshot.lock() {
+                    snap.is_running = false;
+                    snap.status = "failsafe".to_string();
+                }
                 event_sink(ExecutorEvent::Log(
                     "WARNUNG Failsafe ausgeloest -- Abbruch!".to_string(),
                 ));
@@ -119,9 +173,10 @@ fn run_worker<F>(
             }
             thread::sleep(Duration::from_millis(300));
         }
+        if let Ok(mut snap) = snapshot.lock() {
+            snap.status = "running".to_string();
+        }
     }
-
-    let total_items = queue.len();
 
     for i in 0..total_items {
         if stop_flag.load(Ordering::SeqCst) {
@@ -130,6 +185,21 @@ fn run_worker<F>(
 
         let item = &mut queue[i];
         item.status = ItemStatus::Running;
+
+        {
+            if let Ok(mut snap) = snapshot.lock() {
+                snap.current_index = i;
+                snap.current_action = item.action.as_str().to_string();
+                snap.current_label = item.label.clone();
+                snap.target_window = item.target_window.clone();
+                snap.remaining_seconds = item.total;
+                snap.phase = String::new();
+                snap.phase_total = item.total;
+                if i < snap.items.len() {
+                    snap.items[i].status = "running".to_string();
+                }
+            }
+        }
 
         event_sink(ExecutorEvent::StepStart {
             index: i,
@@ -147,17 +217,17 @@ fn run_worker<F>(
         )));
 
         let completed = if item.action == ActionType::Sleep {
-            handle_sleep_step(i, item, &stop_flag, &event_sink)
+            handle_sleep_step(i, item, &stop_flag, &snapshot, &event_sink)
         } else if item.action == ActionType::Caffeine {
             // Enable caffeine for the full duration, then disable
             set_caffeine(true);
             event_sink(ExecutorEvent::Log("  -> Caffeine aktiv: Bildschirm bleibt an.".to_string()));
-            let done = countdown(i, item.total, item.total, ItemPhase::None, &stop_flag, &event_sink);
+            let done = countdown(i, item.total, item.total, ItemPhase::None, &stop_flag, &snapshot, &event_sink);
             set_caffeine(false);
             event_sink(ExecutorEvent::Log("  -> Caffeine beendet.".to_string()));
             done
         } else {
-            let done = countdown(i, item.total, item.total, ItemPhase::None, &stop_flag, &event_sink);
+            let done = countdown(i, item.total, item.total, ItemPhase::None, &stop_flag, &snapshot, &event_sink);
             if done {
                 dispatch_with_retry(item, &event_sink);
             }
@@ -170,13 +240,30 @@ fn run_worker<F>(
 
         item.rem = 0;
         item.status = ItemStatus::Done;
+        {
+            if let Ok(mut snap) = snapshot.lock() {
+                if i < snap.items.len() {
+                    snap.items[i].status = "done".to_string();
+                }
+            }
+        }
         event_sink(ExecutorEvent::StepDone { index: i });
         event_sink(ExecutorEvent::Log(format!("Schritt {} abgeschlossen.", i + 1)));
     }
 
     if stop_flag.load(Ordering::SeqCst) {
+        if let Ok(mut snap) = snapshot.lock() {
+            snap.is_running = false;
+            snap.status = "stopped".to_string();
+        }
         event_sink(ExecutorEvent::Stopped);
     } else {
+        if let Ok(mut snap) = snapshot.lock() {
+            snap.is_running = false;
+            snap.status = "done".to_string();
+            snap.remaining_seconds = 0;
+            snap.phase = String::new();
+        }
         event_sink(ExecutorEvent::AllDone { total_items });
     }
 }
@@ -185,8 +272,10 @@ fn handle_sleep_step<F>(
     index: usize,
     item: &Item,
     stop_flag: &Arc<AtomicBool>,
+    snapshot: &Arc<Mutex<QueueSnapshot>>,
     event_sink: &F,
 ) -> bool
+
 where
     F: Fn(ExecutorEvent) + Send + Sync + 'static,
 {
@@ -204,6 +293,7 @@ where
         cfg.pre_sleep_grace,
         ItemPhase::Grace,
         stop_flag,
+        snapshot,
         event_sink,
     ) {
         return false;
@@ -242,6 +332,7 @@ where
             cfg.post_wake_delay,
             ItemPhase::PostWake,
             stop_flag,
+            snapshot,
             event_sink,
         )
     } else {
@@ -256,6 +347,7 @@ where
             item.total,
             ItemPhase::AwakeFallback,
             stop_flag,
+            snapshot,
             event_sink,
         )
     }
@@ -267,6 +359,7 @@ fn countdown<F>(
     phase_total: u64,
     phase: ItemPhase,
     stop_flag: &Arc<AtomicBool>,
+    snapshot: &Arc<Mutex<QueueSnapshot>>,
     event_sink: &F,
 ) -> bool
 where
@@ -277,6 +370,10 @@ where
 
     while !stop_flag.load(Ordering::SeqCst) {
         if is_failsafe_triggered() {
+            if let Ok(mut snap) = snapshot.lock() {
+                snap.is_running = false;
+                snap.status = "failsafe".to_string();
+            }
             event_sink(ExecutorEvent::Log(
                 "WARNUNG Failsafe ausgeloest -- Abbruch!".to_string(),
             ));
@@ -291,6 +388,15 @@ where
         } else {
             duration_secs - elapsed.as_secs()
         };
+
+        {
+            if let Ok(mut snap) = snapshot.lock() {
+                snap.current_index = index;
+                snap.remaining_seconds = rem;
+                snap.phase = phase.as_str().to_string();
+                snap.phase_total = phase_total;
+            }
+        }
 
         event_sink(ExecutorEvent::Tick {
             index,

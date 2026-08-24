@@ -159,6 +159,50 @@ impl Item {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct QueueItemSummary {
+    pub index: usize,
+    pub label: String,
+    pub action: String,
+    pub total_seconds: u64,
+    pub target_window: String,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct QueueSnapshot {
+    pub is_running: bool,
+    pub status: String,
+    pub current_index: usize,
+    pub total_items: usize,
+    pub current_action: String,
+    pub current_label: String,
+    pub target_window: String,
+    pub remaining_seconds: u64,
+    pub phase: String,
+    pub phase_total: u64,
+    pub items: Vec<QueueItemSummary>,
+}
+
+impl Default for QueueSnapshot {
+    fn default() -> Self {
+        Self {
+            is_running: false,
+            status: "idle".to_string(),
+            current_index: 0,
+            total_items: 0,
+            current_action: String::new(),
+            current_label: String::new(),
+            target_window: String::new(),
+            remaining_seconds: 0,
+            phase: String::new(),
+            phase_total: 0,
+            items: Vec::new(),
+        }
+    }
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;

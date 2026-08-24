@@ -25,7 +25,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use crate::executor::{ExecutorEvent, QueueExecutor};
 use crate::models::{ActionType, Item, SleepConfig};
 use crate::platform::windows::input::get_open_windows;
-use crate::platform::windows::power::{is_admin, request_elevation_with_pending, set_caffeine};
+use crate::platform::windows::power::{configure_passwordless_wake, set_caffeine};
 use crate::updater::{check_for_update, download_and_apply, CURRENT_VERSION, REPO};
 
 // ---------------------------------------------------------------------------
@@ -86,7 +86,7 @@ fn attach_console() {}
 #[command(
     name = "act",
     version = CURRENT_VERSION,
-    about = "AutoClickTimer -- headless CLI. All GUI features accessible from the shell.",
+    about = "AutoClickTimer -- headless CLI and Model Context Protocol (MCP) server.",
     long_about = None,
 )]
 struct Cli {
@@ -96,6 +96,13 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Start Model Context Protocol (MCP) server over stdio for AI agents
+    Mcp,
+
+    /// Configure current user session to wake from sleep without password lockscreen
+    #[command(name = "configure-wake-lock")]
+    ConfigureWakeLock,
+
     /// Execute a saved .act profile headlessly
     Run {
         /// Path to an .act profile (JSON queue)
@@ -233,11 +240,34 @@ impl From<CliAction> for ActionType {
 // ---------------------------------------------------------------------------
 
 pub fn run_cli() -> ! {
-    attach_console();
+    let is_mcp = std::env::args().any(|a| a == "mcp");
+    if !is_mcp {
+        attach_console();
+    }
 
     let cli = Cli::parse();
 
     match cli.command {
+        // ------------------------------------------------------------------
+        Commands::Mcp => {
+            crate::mcp::run_mcp_server();
+        }
+
+        // ------------------------------------------------------------------
+        Commands::ConfigureWakeLock => {
+            match configure_passwordless_wake() {
+                Ok(msg) => {
+                    println!("{}", msg);
+                    println!("Windows is configured to resume directly to user session without lock screen password.");
+                    process::exit(0);
+                }
+                Err(e) => {
+                    eprintln!("error: {}", e);
+                    process::exit(1);
+                }
+            }
+        }
+
         // ------------------------------------------------------------------
         Commands::Version => {
             println!("AutoClickTimer v{}", CURRENT_VERSION);
@@ -317,7 +347,6 @@ pub fn run_cli() -> ! {
                 Err(e) => { eprintln!("error: invalid .act profile: {}", e); process::exit(1); }
             };
             if queue.is_empty() { eprintln!("error: profile contains no items."); process::exit(1); }
-            ensure_sleep_admin(&queue);
             let scheduled = resolve_start(delay.as_deref(), start_at.as_deref());
             run_queue(queue, scheduled);
         }
@@ -342,7 +371,6 @@ pub fn run_cli() -> ! {
             item.sleep_cfg          = SleepConfig { pre_sleep_grace: grace, post_wake_delay: post_wake };
             if let Some(w) = window { item.target_window = w; }
 
-            ensure_sleep_admin(&[item.clone()]);
             let scheduled = resolve_start(delay.as_deref(), start_at.as_deref());
             run_queue(vec![item], scheduled);
         }
@@ -370,23 +398,8 @@ pub fn run_cli() -> ! {
                 }
             }
 
-            ensure_sleep_admin(&queue);
             let scheduled = resolve_start(delay.as_deref(), start_at.as_deref());
             run_queue(queue, scheduled);
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Auto-elevation for Sleep actions
-// ---------------------------------------------------------------------------
-
-fn ensure_sleep_admin(queue: &[Item]) {
-    if queue.iter().any(|i| i.action == ActionType::Sleep) && !is_admin() {
-        println!("Administrator privileges required for Sleep & Wake. Requesting elevation...");
-        if let Err(e) = request_elevation_with_pending(None) {
-            eprintln!("Elevation error: {}", e);
-            process::exit(1);
         }
     }
 }

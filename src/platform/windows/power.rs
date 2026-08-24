@@ -303,3 +303,35 @@ fn encode_ps(script: &str) -> String {
 pub fn shutdown_pc() {
     let _ = Command::new("shutdown").args(["/s", "/t", "0"]).spawn();
 }
+
+/// Configures user-level settings to allow waking directly without requiring a password prompt.
+/// Operates in standard user space (HKCU / powercfg) without requiring administrator rights.
+pub fn configure_passwordless_wake() -> Result<String, String> {
+    // 1. Disable screensaver password lock
+    let _ = Command::new("reg")
+        .args([
+            "add",
+            "HKCU\\Control Panel\\Desktop",
+            "/v",
+            "ScreenSaverIsSecure",
+            "/t",
+            "REG_SZ",
+            "/d",
+            "0",
+            "/f",
+        ])
+        .output();
+
+    // 2. Disable console lock on resume in current power scheme
+    let _ = Command::new("powercfg")
+        .args(["/SETACVALUEINDEX", "SCHEME_CURRENT", "SUB_NONE", "CONSOLELOCK", "0"])
+        .output();
+    let _ = Command::new("powercfg")
+        .args(["/SETDCVALUEINDEX", "SCHEME_CURRENT", "SUB_NONE", "CONSOLELOCK", "0"])
+        .output();
+    let _ = Command::new("powercfg")
+        .args(["/SETACTIVE", "SCHEME_CURRENT"])
+        .output();
+
+    Ok("Passwordless wake configured for current user session.".to_string())
+}
