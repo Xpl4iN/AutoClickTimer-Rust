@@ -313,7 +313,8 @@ component CaffeineToggle inherits Rectangle {
 }
 
 export component AppWindow inherits Window {
-    title: "AutoClick Timer  v1.4.2";
+    in property <string> app_title: "AutoClick Timer";
+    title: root.app_title;
     icon: @image-url("app_icon.png");
     min-width: 880px;
     min-height: 640px;
@@ -408,7 +409,7 @@ export component AppWindow inherits Window {
 
             // App Title & Version (Clean Title matching Python)
             Text {
-                text: "AutoClick Timer  v1.4.2";
+                text: root.app_title;
                 font-size: 20px;
                 font-weight: 700;
                 color: #e8e8ea;

@@ -89,6 +89,7 @@ fn main() -> Result<(), slint::PlatformError> {
     // Populate initial window list and pick button text
     refresh_window_list(&main_window);
     main_window.set_pick_btn_text(t("pick_coords_btn").into());
+    main_window.set_app_title(format!("AutoClick Timer  v{}", env!("CARGO_PKG_VERSION")).into());
 
     // ---- Restore pending item from elevated relaunch ----
     // If the process was relaunched via UAC with a --pending-item arg, deserialize
