@@ -142,6 +142,14 @@ fn lookup(key: &'static str, is_en: bool) -> &'static str {
         ("p3_desc", true) => "Safely shut down computer after the specified time elapsed.",
         ("add_preset_btn", false) => "+ Hinzufügen",
         ("add_preset_btn", true) => "+ Add",
+        ("p4_title", false) => "Timer + Koffein (Bildschirm wach)",
+        ("p4_title", true) => "Timer + Caffeine (Keep Awake)",
+        ("p4_desc", false) => "Verhindert, dass der Bildschirm sich ausschaltet oder der PC in den Ruhezustand wechselt.",
+        ("p4_desc", true) => "Prevents screen from turning off or PC from sleeping for the set duration.",
+        ("p5_title", false) => "Timer + Enter",
+        ("p5_title", true) => "Timer + Enter",
+        ("p5_desc", false) => "Wartet die eingestellte Zeit ab und drückt dann die Enter-Taste.",
+        ("p5_desc", true) => "Waits the set duration, then presses the Enter key.",
 
         // Queue Panel
         ("queue_header", false) => "WARTESCHLANGE",

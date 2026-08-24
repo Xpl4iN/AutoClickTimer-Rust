@@ -16,7 +16,7 @@ use crate::platform::windows::input::{
     execute_with_foreground, find_window_by_title, post_click_to_hwnd, post_enter_to_hwnd,
     send_click_global, send_enter_global, send_text_to_hwnd, send_type_global,
 };
-use crate::platform::windows::power::{execute_sleep_with_retry, shutdown_pc};
+use crate::platform::windows::power::{execute_sleep_with_retry, set_caffeine, shutdown_pc};
 
 const MAX_ACTION_RETRIES: u32 = 3;
 const ACTION_RETRY_DELAY: Duration = Duration::from_millis(1000);
@@ -148,6 +148,14 @@ fn run_worker<F>(
 
         let completed = if item.action == ActionType::Sleep {
             handle_sleep_step(i, item, &stop_flag, &event_sink)
+        } else if item.action == ActionType::Caffeine {
+            // Enable caffeine for the full duration, then disable
+            set_caffeine(true);
+            event_sink(ExecutorEvent::Log("  -> Caffeine aktiv: Bildschirm bleibt an.".to_string()));
+            let done = countdown(i, item.total, item.total, ItemPhase::None, &stop_flag, &event_sink);
+            set_caffeine(false);
+            event_sink(ExecutorEvent::Log("  -> Caffeine beendet.".to_string()));
+            done
         } else {
             let done = countdown(i, item.total, item.total, ItemPhase::None, &stop_flag, &event_sink);
             if done {
@@ -359,22 +367,21 @@ fn dispatch_single_action(item: &Item) -> Result<(), String> {
                     send_text_to_hwnd(hwnd, &item.prompt);
                     return Ok(());
                 }
-                ActionType::Sleep => return Ok(()),
-                ActionType::Shutdown => {
-                    shutdown_pc();
-                    return Ok(());
-                }
+                ActionType::Sleep    => return Ok(()),
+                ActionType::Shutdown => { shutdown_pc(); return Ok(()); }
+                ActionType::Caffeine => return Ok(()), // handled in run_worker
             }
         }
     }
 
     // Global execution
     match item.action {
-        ActionType::Enter => send_enter_global(),
-        ActionType::Click => send_click_global(),
-        ActionType::Type => send_type_global(&item.prompt)?,
-        ActionType::Sleep => {}
+        ActionType::Enter    => send_enter_global(),
+        ActionType::Click    => send_click_global(),
+        ActionType::Type     => send_type_global(&item.prompt)?,
+        ActionType::Sleep    => {}
         ActionType::Shutdown => shutdown_pc(),
+        ActionType::Caffeine => {} // handled separately in run_worker
     }
 
     Ok(())

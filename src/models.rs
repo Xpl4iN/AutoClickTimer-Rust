@@ -11,27 +11,30 @@ pub enum ActionType {
     Type,
     Sleep,
     Shutdown,
+    Caffeine,
 }
 
 impl ActionType {
     pub fn as_str(&self) -> &'static str {
         match self {
-            ActionType::Enter => "enter",
-            ActionType::Click => "click",
-            ActionType::Type => "type",
-            ActionType::Sleep => "sleep",
+            ActionType::Enter    => "enter",
+            ActionType::Click    => "click",
+            ActionType::Type     => "type",
+            ActionType::Sleep    => "sleep",
             ActionType::Shutdown => "shutdown",
+            ActionType::Caffeine => "caffeine",
         }
     }
 
     pub fn from_str_loose(s: &str) -> Self {
         match s.to_lowercase().as_str() {
-            "enter" => ActionType::Enter,
-            "click" => ActionType::Click,
-            "type" => ActionType::Type,
-            "sleep" => ActionType::Sleep,
+            "enter"    => ActionType::Enter,
+            "click"    => ActionType::Click,
+            "type"     => ActionType::Type,
+            "sleep"    => ActionType::Sleep,
             "shutdown" => ActionType::Shutdown,
-            _ => ActionType::Enter,
+            "caffeine" => ActionType::Caffeine,
+            _          => ActionType::Enter,
         }
     }
 }

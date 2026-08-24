@@ -33,13 +33,35 @@ pub fn is_admin() -> bool {
 }
 
 /// Relaunch current executable with UAC Administrator elevation.
-pub fn request_elevation() -> Result<(), String> {
+/// Optionally forwards a base64-encoded JSON payload via `--pending-item`
+/// so the elevated instance can restore the item into its queue on startup.
+pub fn request_elevation_with_pending(pending_b64: Option<&str>) -> Result<(), String> {
     let current_exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let exe_wide: Vec<u16> = current_exe.as_os_str().encode_wide().chain(Some(0)).collect();
     let runas_wide: Vec<u16> = OsStr::new("runas").encode_wide().chain(Some(0)).collect();
 
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let args_str = args.join(" ");
+    // Forward existing args (minus any old --pending-item), then append new payload.
+    let existing: Vec<String> = std::env::args().skip(1).collect();
+    let mut forwarded: Vec<String> = Vec::new();
+    let mut skip_next = false;
+    for arg in existing {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        if arg == "--pending-item" {
+            skip_next = true;
+            continue;
+        }
+        forwarded.push(arg);
+    }
+
+    if let Some(payload) = pending_b64 {
+        forwarded.push("--pending-item".to_string());
+        forwarded.push(payload.to_string());
+    }
+
+    let args_str = forwarded.join(" ");
     let args_wide: Vec<u16> = OsStr::new(&args_str).encode_wide().chain(Some(0)).collect();
 
     unsafe {
@@ -58,6 +80,12 @@ pub fn request_elevation() -> Result<(), String> {
             Err("UAC elevation was cancelled or failed".to_string())
         }
     }
+}
+
+/// Convenience wrapper -- elevate without a pending payload.
+#[allow(dead_code)]
+pub fn request_elevation() -> Result<(), String> {
+    request_elevation_with_pending(None)
 }
 
 /// Enable or disable native Windows Caffeine keep-awake.

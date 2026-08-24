@@ -283,7 +283,7 @@ component CaffeineToggle inherits Rectangle {
 }
 
 export component AppWindow inherits Window {
-    title: "AutoClick Timer  v1.3.0";
+    title: "AutoClick Timer  v1.3.1";
     icon: @image-url("app_icon.png");
     min-width: 880px;
     min-height: 640px;
@@ -366,7 +366,7 @@ export component AppWindow inherits Window {
 
             // App Title & Version (Clean Title matching Python)
             Text {
-                text: "AutoClick Timer  v1.3.0";
+                text: "AutoClick Timer  v1.3.1";
                 font-size: 20px;
                 font-weight: 700;
                 color: #e8e8ea;
@@ -1090,6 +1090,90 @@ export component AppWindow inherits Window {
                                         background: touch_p3.has-hover ? #3a7683 : #4891A1;
                                         border-radius: 6px;
                                         touch_p3 := TouchArea { mouse-cursor: pointer; clicked => { root.add_preset("shutdown", root.mode_type, root.input_h.to-float(), root.input_m.to-float(), root.input_s.to-float()); } }
+                                        Text { text: root.current_language == "DE" ? "+ Hinzufügen" : "+ Add"; font-size: 11px; font-weight: 700; color: #fff; vertical-alignment: center; horizontal-alignment: center; }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Preset 4: Timer + Caffeine (Keep Awake)
+                        Rectangle {
+                            background: #202026;
+                            border-width: 1px;
+                            border-color: #3f3f4c;
+                            border-radius: 10px;
+                            height: p4_layout.preferred-height;
+
+                            p4_layout := VerticalLayout {
+                                padding-left: 12px;
+                                padding-right: 12px;
+                                padding-top: 8px;
+                                padding-bottom: 8px;
+
+                                HorizontalLayout {
+                                    spacing: 12px;
+                                    alignment: space-between;
+                                    VerticalLayout {
+                                        horizontal-stretch: 1;
+                                        spacing: 2px;
+                                        alignment: center;
+                                        Text { text: root.current_language == "DE" ? "Timer + Koffein (Bildschirm wach)" : "Timer + Caffeine (Keep Awake)"; font-size: 11px; font-weight: 700; color: #e8e8ea; }
+                                        Text {
+                                            text: root.current_language == "DE" ? "Verhindert, dass der Bildschirm sich ausschaltet oder der PC in den Ruhezustand wechselt." : "Prevents screen from turning off or PC from sleeping for the set duration.";
+                                            font-size: 10px;
+                                            color: #8b8b99;
+                                            wrap: word-wrap;
+                                        }
+                                    }
+                                    Rectangle {
+                                        width: 90px;
+                                        height: 30px;
+                                        horizontal-stretch: 0;
+                                        background: touch_p4.has-hover ? #3a7683 : #4891A1;
+                                        border-radius: 6px;
+                                        touch_p4 := TouchArea { mouse-cursor: pointer; clicked => { root.add_preset("caffeine", root.mode_type, root.input_h.to-float(), root.input_m.to-float(), root.input_s.to-float()); } }
+                                        Text { text: root.current_language == "DE" ? "+ Hinzufügen" : "+ Add"; font-size: 11px; font-weight: 700; color: #fff; vertical-alignment: center; horizontal-alignment: center; }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Preset 5: Timer + Enter (no sleep, no admin needed)
+                        Rectangle {
+                            background: #202026;
+                            border-width: 1px;
+                            border-color: #3f3f4c;
+                            border-radius: 10px;
+                            height: p5_layout.preferred-height;
+
+                            p5_layout := VerticalLayout {
+                                padding-left: 12px;
+                                padding-right: 12px;
+                                padding-top: 8px;
+                                padding-bottom: 8px;
+
+                                HorizontalLayout {
+                                    spacing: 12px;
+                                    alignment: space-between;
+                                    VerticalLayout {
+                                        horizontal-stretch: 1;
+                                        spacing: 2px;
+                                        alignment: center;
+                                        Text { text: "Timer + Enter"; font-size: 11px; font-weight: 700; color: #e8e8ea; }
+                                        Text {
+                                            text: root.current_language == "DE" ? "Wartet die eingestellte Zeit ab und drückt dann die Enter-Taste." : "Waits the set duration, then presses the Enter key.";
+                                            font-size: 10px;
+                                            color: #8b8b99;
+                                            wrap: word-wrap;
+                                        }
+                                    }
+                                    Rectangle {
+                                        width: 90px;
+                                        height: 30px;
+                                        horizontal-stretch: 0;
+                                        background: touch_p5.has-hover ? #3a7683 : #4891A1;
+                                        border-radius: 6px;
+                                        touch_p5 := TouchArea { mouse-cursor: pointer; clicked => { root.add_preset("enter_only", root.mode_type, root.input_h.to-float(), root.input_m.to-float(), root.input_s.to-float()); } }
                                         Text { text: root.current_language == "DE" ? "+ Hinzufügen" : "+ Add"; font-size: 11px; font-weight: 700; color: #fff; vertical-alignment: center; horizontal-alignment: center; }
                                     }
                                 }
