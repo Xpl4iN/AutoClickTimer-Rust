@@ -3,6 +3,8 @@
 **/*.rs.bk
 *.new
 *.bat
+*.exe
+*.apk
 
 # Flutter & Dart
 mobile/build/
