@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
@@ -12,9 +13,73 @@ class SettingsScreen extends StatefulWidget {
   State<SettingsScreen> createState() => _SettingsScreenState();
 }
 
-class _SettingsScreenState extends State<SettingsScreen> {
+class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObserver {
   bool _configLoading = false;
   bool _updateChecking = false;
+  bool _remoteModeLoading = false;
+  bool _remoteModeEnabled = false;
+  Timer? _remoteModeRefreshTimer;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    WidgetsBinding.instance.addPostFrameCallback((_) => _refreshRemoteMode());
+    _remoteModeRefreshTimer = Timer.periodic(const Duration(seconds: 10), (_) => _refreshRemoteMode());
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) _refreshRemoteMode();
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _remoteModeRefreshTimer?.cancel();
+    super.dispose();
+  }
+
+  Future<void> _refreshRemoteMode() async {
+    try {
+      final mcp = context.read<McpService>();
+      if (!mcp.isConnected) return;
+      final r = await mcp.getRemoteMode();
+      if (mounted) setState(() => _remoteModeEnabled = r['enabled'] == true);
+    } catch (_) {
+      // The connection card already reports offline state.
+    }
+  }
+
+  Future<void> _setRemoteMode(bool enabled) async {
+    HapticFeedback.lightImpact();
+    setState(() {
+      _remoteModeLoading = true;
+      _remoteModeEnabled = enabled;
+    });
+    try {
+      final r = await context.read<McpService>().setRemoteMode(enabled);
+      if (mounted) {
+        setState(() => _remoteModeEnabled = r['enabled'] == true);
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(enabled ? 'Remote-agent power protection enabled' : 'Remote-agent power protection disabled'),
+            backgroundColor: const Color(0xFF10B981),
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() => _remoteModeEnabled = !enabled);
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Remote mode error: $e'), backgroundColor: const Color(0xFFEF4444)),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _remoteModeLoading = false);
+    }
+  }
 
   Future<void> _checkForUpdate() async {
     HapticFeedback.lightImpact();
@@ -306,6 +371,27 @@ class _SettingsScreenState extends State<SettingsScreen> {
             ),
             child: Column(
               children: [
+                ListTile(
+                  dense: true,
+                  leading: Container(
+                    padding: const EdgeInsets.all(6),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF10B981).withValues(alpha: 0.12),
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: const Icon(Icons.power_settings_new, color: Color(0xFF10B981), size: 18),
+                  ),
+                  title: const Text('Remote-Agent Power Protection', style: TextStyle(fontWeight: FontWeight.w600, fontSize: 13.5)),
+                  subtitle: const Text('Prevent idle sleep and lid-close sleep while remotely connected', style: TextStyle(color: Color(0xFF8B92A5), fontSize: 11.5)),
+                  trailing: _remoteModeLoading
+                      ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2, color: Color(0xFF10B981)))
+                      : Switch.adaptive(
+                          value: _remoteModeEnabled,
+                          onChanged: mcp.isConnected ? _setRemoteMode : null,
+                          activeThumbColor: const Color(0xFF10B981),
+                        ),
+                ),
+                const Divider(height: 1, color: Color(0xFF242838)),
                 ListTile(
                   dense: true,
                   leading: Container(

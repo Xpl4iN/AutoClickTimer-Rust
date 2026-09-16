@@ -54,13 +54,6 @@ class McpService extends ChangeNotifier {
         },
       );
 
-      // MCP initialize handshake
-      await _call('initialize', {
-        'protocolVersion': '2024-11-05',
-        'capabilities': {},
-        'clientInfo': {'name': 'AutoClickTimer-Remote', 'version': '1.0.0'},
-      });
-
       // API key auth if required
       if (apiKey != null && apiKey!.isNotEmpty) {
         final resp = await _call('auth', {'key': apiKey!});
@@ -71,6 +64,14 @@ class McpService extends ChangeNotifier {
           throw Exception(_lastError);
         }
       }
+
+      // MCP initialize handshake. The native TCP server requires auth first
+      // when an API key is configured.
+      await _call('initialize', {
+        'protocolVersion': '2024-11-05',
+        'capabilities': {},
+        'clientInfo': {'name': 'AutoClickTimer-Remote', 'version': '1.0.0'},
+      });
 
       _authenticated = true;
       _setState(McpConnectionState.connected);
@@ -137,7 +138,13 @@ class McpService extends ChangeNotifier {
   Future<Map<String, dynamic>> callTool(String name, [Map<String, dynamic>? args]) async {
     final resp = await _call('tools/call', {'name': name, 'arguments': args ?? {}});
     if (resp['error'] != null) throw Exception(resp['error']['message']);
-    final content = (resp['result']?['content'] as List?)?.first;
+    final result = resp['result'];
+    if (result is Map && result['isError'] == true) {
+      final content = (result['content'] as List?)?.first;
+      final message = content is Map ? content['text']?.toString() : null;
+      throw Exception(message ?? 'MCP tool "$name" failed');
+    }
+    final content = (result is Map ? result['content'] as List? : null)?.first;
     final text = content?['text'] as String? ?? '';
     try {
       return jsonDecode(text) as Map<String, dynamic>;
@@ -183,6 +190,11 @@ class McpService extends ChangeNotifier {
 
   Future<Map<String, dynamic>> configurePasswordlessWake() =>
       callTool('act_configure_passwordless_wake');
+
+  Future<Map<String, dynamic>> getRemoteMode() => callTool('act_get_remote_mode');
+
+  Future<Map<String, dynamic>> setRemoteMode(bool enabled) =>
+      callTool('act_set_remote_mode', {'enabled': enabled});
 }
 
 enum McpConnectionState { disconnected, connecting, connected }

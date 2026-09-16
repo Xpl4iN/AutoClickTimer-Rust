@@ -24,9 +24,28 @@ use crate::mcp::{start_gui_mcp_server, McpGuiEvent};
 use crate::models::{ActionType, Item, ItemPhase, ItemStatus, SleepConfig};
 use crate::platform::windows::input::get_open_windows;
 use crate::platform::windows::power::set_caffeine;
+use crate::platform::windows::remote_mode;
 use crate::updater::{check_for_update, download_and_apply, UpdateInfo, CURRENT_VERSION, REPO};
 
 slint::include_modules!();
+
+fn show_remote_mode(app: &AppWindow, result: Result<remote_mode::RemoteModeStatus, String>) {
+    let german = app.get_current_language() == "DE";
+    match result {
+        Ok(status) => {
+            app.set_remote_mode_active(status.enabled);
+            let detail = if status.effective {
+                if german { "Aktiv: bleibt bei geschlossenem Deckel wach; Display darf ausgehen".into() }
+                else { "Active: stays awake with lid closed; display may turn off".into() }
+            } else if status.enabled {
+                format!("{}: {}", if german { "Prüfung nötig" } else { "Needs attention" }, status.discrepancies.join("; "))
+            } else if german { "Aus. Einschalten hält den Laptop auch mit geschlossenem Deckel wach.".into() }
+            else { "Off. Enable to keep the laptop awake with its lid closed.".into() };
+            app.set_remote_mode_detail(detail.into());
+        }
+        Err(error) => app.set_remote_mode_detail(format!("Remote mode: {error}").into()),
+    }
+}
 
 struct AppState {
     queue: Vec<Item>,
@@ -90,6 +109,20 @@ fn main() -> Result<(), slint::PlatformError> {
     refresh_window_list(&main_window);
     main_window.set_pick_btn_text(t("pick_coords_btn").into());
     main_window.set_app_title(format!("AutoClick Timer  v{}", env!("CARGO_PKG_VERSION")).into());
+    // Native reads on a worker keep the UI responsive and reflect CLI/MCP changes.
+    {
+        let weak = main_window.as_weak();
+        thread::spawn(move || loop {
+            let result = remote_mode::status();
+            let weak = weak.clone();
+            if slint::invoke_from_event_loop(move || {
+                if let Some(app) = weak.upgrade() {
+                    if !app.get_remote_mode_busy() { show_remote_mode(&app, result); }
+                }
+            }).is_err() { break; }
+            thread::sleep(Duration::from_secs(5));
+        });
+    }
 
     // ---- Restore pending item from elevated relaunch ----
     // If the process was relaunched via UAC with a --pending-item arg, deserialize
@@ -131,6 +164,7 @@ fn main() -> Result<(), slint::PlatformError> {
                             };
                             append_log(&handle, &state_clone, &format!("[Remote] {}", msg));
                         }
+                        McpGuiEvent::RemoteModeToggled(status) => show_remote_mode(&app, Ok(status)),
                         McpGuiEvent::QueueScheduled { items, scheduled_start, repeat_count } => {
                             {
                                 let mut s = state_clone.lock().unwrap();
@@ -154,7 +188,7 @@ fn main() -> Result<(), slint::PlatformError> {
                                 append_log(&handle, &state_clone, &format!("[Remote] Warteschlange gestartet ({} Schritte)", items.len()));
                             }
                         }
-                        McpGuiEvent::ActionExecuted { item, repeat_count } => {
+                        McpGuiEvent::ActionExecuted { item, repeat_count, scheduled_start } => {
                             {
                                 let mut s = state_clone.lock().unwrap();
                                 s.queue = vec![item.clone()];
@@ -169,8 +203,13 @@ fn main() -> Result<(), slint::PlatformError> {
                             } else {
                                 app.set_iteration_badge_text("".into());
                             }
-                            app.set_status_text(t("status_running").into());
-                            append_log(&handle, &state_clone, &format!("[Remote] Aktion ausgeführt: {} ({}s)", item.label, item.total));
+                            if let Some(start_dt) = scheduled_start {
+                                app.set_status_text(format!("Geplant für {}", start_dt.format("%H:%M:%S")).into());
+                                append_log(&handle, &state_clone, &format!("[Remote] Aktion geplant für {}: {} ({}s)", start_dt.format("%H:%M:%S"), item.label, item.total));
+                            } else {
+                                app.set_status_text(t("status_running").into());
+                                append_log(&handle, &state_clone, &format!("[Remote] Aktion gestartet: {} ({}s)", item.label, item.total));
+                            }
                         }
                         McpGuiEvent::QueueCancelled => {
                             app.set_is_running(false);
@@ -189,7 +228,10 @@ fn main() -> Result<(), slint::PlatformError> {
             });
         });
 
-        start_gui_mcp_server(7890, None, executor_clone, Some(gui_sink));
+        let api_key = std::env::var("AUTOCLICKTIMER_MCP_API_KEY")
+            .ok()
+            .filter(|key| !key.trim().is_empty());
+        start_gui_mcp_server(7890, api_key, executor_clone, Some(gui_sink));
     }
 
     // ---- Event Callbacks ----
@@ -748,6 +790,35 @@ fn main() -> Result<(), slint::PlatformError> {
         });
     }
 
+    // Persistent remote-agent power mode
+    {
+        let weak = main_window.as_weak();
+        main_window.on_toggle_remote_mode(move |enabled| {
+            if let Some(app) = weak.upgrade() {
+                app.set_remote_mode_busy(true);
+                app.set_remote_mode_detail("Applying Windows power settings...".into());
+            }
+            let weak = weak.clone();
+            thread::spawn(move || {
+                let result = remote_mode::set_enabled(enabled);
+                let error = result.as_ref().err().cloned();
+                let actual = if error.is_some() { remote_mode::status() } else { result };
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(app) = weak.upgrade() {
+                        app.set_remote_mode_busy(false);
+                        if error.is_some() && actual.is_err() {
+                            app.set_remote_mode_active(!enabled);
+                        }
+                        show_remote_mode(&app, actual);
+                        if let Some(error) = error {
+                            app.set_remote_mode_detail(format!("Remote mode error: {error}").into());
+                        }
+                    }
+                });
+            });
+        });
+    }
+
     // Switch Language
     {
         let state = Arc::clone(&state);
@@ -1052,6 +1123,21 @@ fn handle_executor_event(
             app.set_is_running(false);
             app.set_iteration_badge_text("".into());
             app.set_status_text(t("stopped").into());
+        }
+        ExecutorEvent::Failed(message) => {
+            app.set_is_running(false);
+            app.set_iteration_badge_text("".into());
+            app.set_status_text(format!("Aktion fehlgeschlagen: {}", message).into());
+            let ts = Local::now().format("%H:%M:%S").to_string();
+            let line = format!("[{}] ERROR {}", ts, message);
+            let mut s = state.lock().unwrap();
+            s.log_lines.push(line.clone());
+            app.set_log_count(s.log_lines.len() as i32);
+            app.set_log_preview(line.into());
+            let model = Rc::new(VecModel::from(
+                s.log_lines.iter().map(|line| line.as_str().into()).collect::<Vec<_>>(),
+            ));
+            app.set_log_lines(ModelRc::from(model));
         }
         ExecutorEvent::Failsafe => {
             app.set_is_running(false);

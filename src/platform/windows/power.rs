@@ -8,6 +8,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Local};
+use crate::platform::windows::remote_mode;
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{CloseHandle, BOOLEAN, HANDLE};
 use windows::Win32::System::Power::{
@@ -122,19 +123,53 @@ pub fn request_elevation() -> Result<(), String> {
     request_elevation_with_pending(None)
 }
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 static CAFFEINE_ACTIVE: AtomicBool = AtomicBool::new(false);
+static CAFFEINE_GENERATION: AtomicU64 = AtomicU64::new(0);
+static CAFFEINE_WORKER: std::sync::OnceLock<std::sync::mpsc::Sender<(bool, std::sync::mpsc::SyncSender<()>)>> = std::sync::OnceLock::new();
 
 /// Enable or disable native Windows Caffeine keep-awake.
-pub fn set_caffeine(active: bool) {
-    CAFFEINE_ACTIVE.store(active, Ordering::SeqCst);
-    unsafe {
-        if active {
-            SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED);
-        } else {
-            SetThreadExecutionState(ES_CONTINUOUS);
-        }
+pub fn set_caffeine(active: bool) -> u64 {
+    let generation = CAFFEINE_GENERATION.fetch_add(1, Ordering::SeqCst).wrapping_add(1);
+    apply_caffeine(active);
+    generation
+}
+
+/// Disable Caffeine only if no newer request has superseded the expected one.
+pub fn disable_caffeine_if_generation(expected: u64) -> bool {
+    let next = expected.wrapping_add(1);
+    if CAFFEINE_GENERATION
+        .compare_exchange(expected, next, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return false;
+    }
+    apply_caffeine(false);
+    true
+}
+
+fn apply_caffeine(active: bool) {
+    // Execution-state requests belong to their OS thread. GUI and MCP callers
+    // must enable and release the request on the same long-lived worker.
+    let worker = CAFFEINE_WORKER.get_or_init(|| {
+        let (sender, receiver) = std::sync::mpsc::channel::<(bool, std::sync::mpsc::SyncSender<()>)>();
+        thread::spawn(move || {
+            while let Ok((enabled, reply)) = receiver.recv() {
+                let flags = if enabled { ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED } else { ES_CONTINUOUS };
+                if unsafe { SetThreadExecutionState(flags) }.0 != 0 {
+                    CAFFEINE_ACTIVE.store(enabled, Ordering::SeqCst);
+                }
+                let _ = reply.send(());
+            }
+            unsafe { SetThreadExecutionState(ES_CONTINUOUS); }
+            CAFFEINE_ACTIVE.store(false, Ordering::SeqCst);
+        });
+        sender
+    });
+    let (reply, received) = std::sync::mpsc::sync_channel(0);
+    if worker.send((active, reply)).is_ok() {
+        let _ = received.recv();
     }
 }
 
@@ -317,8 +352,11 @@ pub fn shutdown_pc() {
 /// Configures user-level settings to allow waking directly without requiring a password prompt.
 /// Operates in standard user space (HKCU / powercfg) without requiring administrator rights.
 pub fn configure_passwordless_wake() -> Result<String, String> {
+    let previous_screen_saver = read_screen_saver_secure()?;
+    let previous_wake_policy = remote_mode::wake_lock_status()?;
+
     // 1. Disable screensaver password lock
-    let _ = Command::new("reg")
+    let registry = Command::new("reg")
         .args([
             "add",
             "HKCU\\Control Panel\\Desktop",
@@ -330,18 +368,187 @@ pub fn configure_passwordless_wake() -> Result<String, String> {
             "0",
             "/f",
         ])
-        .output();
+        .output()
+        .map_err(|e| format!("Failed to update screen-saver policy: {e}"))?;
+    if !registry.status.success() {
+        return Err(format!(
+            "Failed to update screen-saver policy: {}",
+            String::from_utf8_lossy(&registry.stderr).trim()
+        ));
+    }
 
     // 2. Disable console lock on resume in current power scheme
-    let _ = Command::new("powercfg")
-        .args(["/SETACVALUEINDEX", "SCHEME_CURRENT", "SUB_NONE", "CONSOLELOCK", "0"])
-        .output();
-    let _ = Command::new("powercfg")
-        .args(["/SETDCVALUEINDEX", "SCHEME_CURRENT", "SUB_NONE", "CONSOLELOCK", "0"])
-        .output();
-    let _ = Command::new("powercfg")
+    for mode in ["/SETACVALUEINDEX", "/SETDCVALUEINDEX"] {
+        let result = Command::new("powercfg")
+            .args([mode, "SCHEME_CURRENT", "SUB_NONE", "CONSOLELOCK", "0"])
+            .output();
+        let result = match result {
+            Ok(result) => result,
+            Err(error) => {
+                return Err(with_passwordless_wake_rollback(
+                    format!("Failed to configure passwordless wake ({mode}): {error}"),
+                    previous_screen_saver.as_deref(),
+                    &previous_wake_policy,
+                ));
+            }
+        };
+        if !result.status.success() {
+            return Err(with_passwordless_wake_rollback(
+                format!(
+                    "Failed to configure passwordless wake ({mode}): {}",
+                    String::from_utf8_lossy(&result.stderr).trim()
+                ),
+                previous_screen_saver.as_deref(),
+                &previous_wake_policy,
+            ));
+        }
+    }
+
+    let activate = Command::new("powercfg")
         .args(["/SETACTIVE", "SCHEME_CURRENT"])
         .output();
+    let activate = match activate {
+        Ok(output) => output,
+        Err(error) => {
+            return Err(with_passwordless_wake_rollback(
+                format!("Failed to activate the current power scheme: {error}"),
+                previous_screen_saver.as_deref(),
+                &previous_wake_policy,
+            ));
+        }
+    };
+    if !activate.status.success() {
+        return Err(with_passwordless_wake_rollback(
+            format!(
+                "Failed to activate the current power scheme: {}",
+                String::from_utf8_lossy(&activate.stderr).trim()
+            ),
+            previous_screen_saver.as_deref(),
+            &previous_wake_policy,
+        ));
+    }
+
+    let wake_status = match remote_mode::wake_lock_status() {
+        Ok(status) => status,
+        Err(error) => {
+            return Err(with_passwordless_wake_rollback(
+                format!("Passwordless wake verification failed: {error}"),
+                previous_screen_saver.as_deref(),
+                &previous_wake_policy,
+            ));
+        }
+    };
+    if wake_status.requires_sign_in() {
+        return Err(with_passwordless_wake_rollback(
+            format!(
+                "Windows still requires sign-in on wake (AC: {}, DC: {}). A policy may be overriding the user setting.",
+                wake_status.ac_requires_sign_in,
+                wake_status.dc_requires_sign_in
+            ),
+            previous_screen_saver.as_deref(),
+            &previous_wake_policy,
+        ));
+    }
 
     Ok("Passwordless wake configured for current user session.".to_string())
+}
+
+fn read_screen_saver_secure() -> Result<Option<String>, String> {
+    let output = Command::new("reg")
+        .args(["query", "HKCU\\Control Panel\\Desktop", "/v", "ScreenSaverIsSecure"])
+        .output()
+        .map_err(|e| format!("Failed to read screen-saver policy: {e}"))?;
+    if !output.status.success() {
+        return Ok(None);
+    }
+    let value = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .find(|line| line.contains("ScreenSaverIsSecure"))
+        .and_then(|line| line.split_whitespace().last())
+        .map(str::to_string);
+    Ok(value)
+}
+
+fn restore_screen_saver_secure(value: Option<&str>) -> Result<(), String> {
+    let output = match value {
+        Some(value) => Command::new("reg")
+            .args([
+                "add",
+                "HKCU\\Control Panel\\Desktop",
+                "/v",
+                "ScreenSaverIsSecure",
+                "/t",
+                "REG_SZ",
+                "/d",
+                value,
+                "/f",
+            ])
+            .output(),
+        None => Command::new("reg")
+            .args([
+                "delete",
+                "HKCU\\Control Panel\\Desktop",
+                "/v",
+                "ScreenSaverIsSecure",
+                "/f",
+            ])
+            .output(),
+    }
+    .map_err(|e| format!("Failed to restore screen-saver policy: {e}"))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "Failed to restore screen-saver policy: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ))
+    }
+}
+
+fn restore_passwordless_wake(
+    screen_saver: Option<&str>,
+    wake_policy: &remote_mode::WakeLockStatus,
+) -> Result<(), String> {
+    let mut errors = Vec::new();
+    if let Err(error) = restore_screen_saver_secure(screen_saver) {
+        errors.push(error);
+    }
+    for (mode, value) in [
+        ("/SETACVALUEINDEX", u32::from(wake_policy.ac_requires_sign_in)),
+        ("/SETDCVALUEINDEX", u32::from(wake_policy.dc_requires_sign_in)),
+    ] {
+        let output = Command::new("powercfg")
+            .args([
+                mode,
+                &wake_policy.active_scheme,
+                "SUB_NONE",
+                "CONSOLELOCK",
+                &value.to_string(),
+            ])
+            .output();
+        match output {
+            Ok(output) if output.status.success() => {}
+            Ok(output) => errors.push(format!(
+                "Failed to restore wake policy ({mode}): {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            )),
+            Err(error) => errors.push(format!("Failed to restore wake policy ({mode}): {error}")),
+        }
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("; "))
+    }
+}
+
+fn with_passwordless_wake_rollback(
+    error: String,
+    screen_saver: Option<&str>,
+    wake_policy: &remote_mode::WakeLockStatus,
+) -> String {
+    match restore_passwordless_wake(screen_saver, wake_policy) {
+        Ok(()) => error,
+        Err(rollback) => format!("{error}; rollback also failed: {rollback}"),
+    }
 }

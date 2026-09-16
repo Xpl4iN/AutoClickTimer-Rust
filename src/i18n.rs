@@ -36,8 +36,8 @@ fn lookup(key: &'static str, is_en: bool) -> &'static str {
         // App Header
         ("app_title", false) => "AutoClick Timer",
         ("app_title", true) => "AutoClick Timer",
-        ("failsafe_tip", false) => "Notfall-Stop: Maus ganz oben-links in die Bildschirmecke schieben",
-        ("failsafe_tip", true) => "Emergency Stop: Move mouse to the top-left screen corner",
+        ("failsafe_tip", false) => "Notfall-Stop: Schaltfläche oder Strg+Umschalt+F12 verwenden",
+        ("failsafe_tip", true) => "Emergency stop: use the Stop button or Ctrl+Shift+F12",
         ("caffeine", false) => "Caffeine",
         ("caffeine", true) => "Caffeine",
         ("update_available", false) => "Update verfügbar",
@@ -291,4 +291,3 @@ pub fn format_clock_preview(delta_secs: u64, target_time: &str) -> String {
         format!("-> in {} (um {})", fmt_short(delta_secs), target_time)
     }
 }
-

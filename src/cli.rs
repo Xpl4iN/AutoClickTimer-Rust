@@ -21,11 +21,14 @@ use std::time::Duration;
 
 use chrono::Local;
 use clap::{Parser, Subcommand, ValueEnum};
+use serde_json::{json, Value};
 
 use crate::executor::{ExecutorEvent, QueueExecutor};
+use crate::mcp::try_call_gui_tool;
 use crate::models::{ActionType, Item, SleepConfig};
 use crate::platform::windows::input::get_open_windows;
 use crate::platform::windows::power::{configure_passwordless_wake, set_caffeine};
+use crate::platform::windows::remote_mode;
 use crate::updater::{check_for_update, download_and_apply, CURRENT_VERSION, REPO};
 
 // ---------------------------------------------------------------------------
@@ -38,13 +41,22 @@ fn attach_console() {
     use windows::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE};
     use windows::Win32::Storage::FileSystem::{
         CreateFileW, FILE_FLAGS_AND_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+        GetFileType, FILE_TYPE_PIPE, FILE_TYPE_DISK,
     };
     use windows::Win32::System::Console::{
-        AllocConsole, AttachConsole, SetStdHandle, ATTACH_PARENT_PROCESS, STD_ERROR_HANDLE,
+        AllocConsole, AttachConsole, GetStdHandle, SetStdHandle, ATTACH_PARENT_PROCESS, STD_ERROR_HANDLE,
         STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
     };
 
     unsafe {
+        // MCP hosts supply pipes. Rebinding those handles to CONIN$/CONOUT$
+        // disconnects JSON-RPC from the host. Preserve redirected CLI output too.
+        for stream in [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
+            if let Ok(handle) = GetStdHandle(stream) {
+                let kind = GetFileType(handle);
+                if kind == FILE_TYPE_PIPE || kind == FILE_TYPE_DISK { return; }
+            }
+        }
         let attached = AttachConsole(ATTACH_PARENT_PROCESS).is_ok() || AllocConsole().is_ok();
         if attached {
             if let Ok(conout) = CreateFileW(
@@ -96,6 +108,12 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Inspect or change unattended remote-agent power mode
+    #[command(name = "remote-mode")]
+    RemoteMode {
+        #[command(subcommand)]
+        action: RemoteModeAction,
+    },
     /// Start Model Context Protocol (MCP) server over stdio for AI agents.
     /// Optionally also listen on a TCP port for remote clients (e.g. mobile app over Tailscale).
     Mcp {
@@ -274,6 +292,9 @@ enum Commands {
     Version,
 }
 
+#[derive(Subcommand, Clone, Copy)]
+enum RemoteModeAction { Status, On, Off }
+
 #[derive(Clone, ValueEnum)]
 enum CliAction {
     Enter,
@@ -306,6 +327,33 @@ pub fn run_cli() -> ! {
     let cli = Cli::parse();
 
     match cli.command {
+        Commands::RemoteMode { action } => {
+            let (tool, arguments) = match action {
+                RemoteModeAction::Status => ("act_get_remote_mode", json!({})),
+                RemoteModeAction::On => ("act_set_remote_mode", json!({ "enabled": true })),
+                RemoteModeAction::Off => ("act_set_remote_mode", json!({ "enabled": false })),
+            };
+            match try_call_gui_tool(tool, arguments) {
+                Ok(Some(status)) => {
+                    println!("{}", serde_json::to_string_pretty(&status).unwrap());
+                    process::exit(0);
+                }
+                Err(e) => {
+                    eprintln!("GUI MCP error: {e}");
+                    process::exit(1);
+                }
+                Ok(None) => {}
+            }
+            let result = match action {
+                RemoteModeAction::Status => remote_mode::status(),
+                RemoteModeAction::On => remote_mode::set_enabled(true),
+                RemoteModeAction::Off => remote_mode::set_enabled(false),
+            };
+            match result {
+                Ok(status) => { println!("{}", serde_json::to_string_pretty(&status).unwrap()); process::exit(0); }
+                Err(e) => { eprintln!("Remote mode error: {e}"); process::exit(1); }
+            }
+        }
         // ------------------------------------------------------------------
         Commands::Mcp { tcp_port, api_key } => {
             crate::mcp::run_mcp_server(tcp_port, api_key);
@@ -313,10 +361,21 @@ pub fn run_cli() -> ! {
 
         // ------------------------------------------------------------------
         Commands::ConfigureWakeLock => {
+            match try_call_gui_tool("act_configure_passwordless_wake", json!({})) {
+                Ok(Some(result)) => {
+                    println!("{}", serde_json::to_string_pretty(&result).unwrap());
+                    process::exit(0);
+                }
+                Err(e) => {
+                    eprintln!("GUI MCP error: {e}");
+                    process::exit(1);
+                }
+                Ok(None) => {}
+            }
             match configure_passwordless_wake() {
                 Ok(msg) => {
                     println!("{}", msg);
-                    println!("Windows is configured to resume directly to user session without lock screen password.");
+                    println!("Windows is configured to avoid a wake password when policy permits it. Windows policy may still require sign-in.");
                     process::exit(0);
                 }
                 Err(e) => {
@@ -381,6 +440,20 @@ pub fn run_cli() -> ! {
             if secs == 0 {
                 eprintln!("error: --for duration must be > 0.");
                 process::exit(1);
+            }
+            match try_call_gui_tool(
+                "act_set_caffeine",
+                json!({ "active": true, "duration_seconds": secs }),
+            ) {
+                Ok(Some(result)) => {
+                    println!("{}", serde_json::to_string_pretty(&result).unwrap());
+                    process::exit(0);
+                }
+                Err(e) => {
+                    eprintln!("GUI MCP error: {e}");
+                    process::exit(1);
+                }
+                Ok(None) => {}
             }
             println!("Caffeine active for {}. Press Ctrl+C to cancel early.", fmt_duration(secs));
             set_caffeine(true);
@@ -514,7 +587,44 @@ pub fn run_cli() -> ! {
 // Queue runner (headless, stdout-only)
 // ---------------------------------------------------------------------------
 
+fn item_to_mcp_step(item: &Item) -> Value {
+    json!({
+        "action": item.action.as_str(),
+        "after": item.total,
+        "label": item.label,
+        "prompt": item.prompt,
+        "window": item.target_window,
+        "foreground": item.require_foreground,
+        "pre_sleep_grace": item.sleep_cfg.pre_sleep_grace,
+        "post_wake_delay": item.sleep_cfg.post_wake_delay,
+        "x": item.click_x,
+        "y": item.click_y,
+        "button": item.click_btn,
+    })
+}
+
 fn run_queue(queue: Vec<Item>, start_at: Option<chrono::DateTime<Local>>, repeat: u32) -> ! {
+    let mut gui_arguments = json!({
+        "steps": queue.iter().map(item_to_mcp_step).collect::<Vec<_>>(),
+        "repeat_count": repeat,
+        "async_execution": false,
+    });
+    if let Some(target) = start_at {
+        let seconds = (target - Local::now()).num_seconds().max(1);
+        gui_arguments["start_in"] = json!(format!("{}s", seconds));
+    }
+    match try_call_gui_tool("act_schedule_queue", gui_arguments) {
+        Ok(Some(result)) => {
+            println!("Forwarded to the running GUI:\n{}", serde_json::to_string_pretty(&result).unwrap());
+            process::exit(0);
+        }
+        Err(e) => {
+            eprintln!("GUI MCP error: {e}");
+            process::exit(1);
+        }
+        Ok(None) => {}
+    }
+
     let rep_label = if repeat == 0 {
         " (Loop: infinite)".to_string()
     } else if repeat > 1 {
@@ -568,6 +678,7 @@ fn handle_event(event: &ExecutorEvent, exit_code: &Arc<Mutex<i32>>) {
         ExecutorEvent::StepDone { index }          => { println!("\n  Step {} done.", index + 1); }
         ExecutorEvent::AllDone { total_items }     => { println!("\nAll {} action(s) completed successfully.", total_items); }
         ExecutorEvent::Stopped                     => { println!("\nQueue stopped."); *exit_code.lock().unwrap() = 1; }
+        ExecutorEvent::Failed(message)              => { println!("\nQueue failed: {}", message); *exit_code.lock().unwrap() = 1; }
         ExecutorEvent::Failsafe                    => { println!("\nFAILSAFE triggered -- aborted."); *exit_code.lock().unwrap() = 2; }
     }
 }

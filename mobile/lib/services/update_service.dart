@@ -19,11 +19,11 @@ class UpdateInfo {
 }
 
 class UpdateService {
-  static const String currentVersion = '1.5.1';
+  static const String currentVersion = '1.6.0';
   static const String repo = 'Xpl4iN/AutoClickTimer-Rust';
   static const MethodChannel _channel = MethodChannel('com.xp.autoclicktimer_remote/updater');
 
-  /// Compare two semantic version strings (e.g., "1.5.2" > "1.5.1")
+  /// Compare two semantic version strings (e.g., "1.6.0" > "1.5.1")
   static bool isNewer(String latest, String current) {
     final lClean = latest.replaceAll(RegExp(r'^v'), '').trim();
     final cClean = current.replaceAll(RegExp(r'^v'), '').trim();

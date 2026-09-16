@@ -17,6 +17,7 @@ use crate::platform::windows::input::{
     send_click_global, send_enter_global, send_text_to_hwnd, send_type_global,
 };
 use crate::platform::windows::power::{execute_sleep_with_retry, set_caffeine, shutdown_pc};
+use crate::platform::windows::remote_mode;
 
 const MAX_ACTION_RETRIES: u32 = 3;
 const ACTION_RETRY_DELAY: Duration = Duration::from_millis(1000);
@@ -47,6 +48,7 @@ pub enum ExecutorEvent {
         total_items: usize,
     },
     Stopped,
+    Failed(String),
     Failsafe,
     Log(String),
 }
@@ -189,6 +191,7 @@ fn run_worker<F>(
     }
 
     let mut iteration: u32 = 1;
+    let mut failure_reason: Option<String> = None;
     loop {
         if stop_flag.load(Ordering::SeqCst) {
             break;
@@ -260,7 +263,13 @@ fn run_worker<F>(
             )));
 
             let completed = if item.action == ActionType::Sleep {
-                handle_sleep_step(i, item, &stop_flag, &snapshot, &event_sink)
+                match handle_sleep_step(i, item, &stop_flag, &snapshot, &event_sink) {
+                    Ok(completed) => completed,
+                    Err(error) => {
+                        failure_reason = Some(error);
+                        false
+                    }
+                }
             } else if item.action == ActionType::Caffeine {
                 // Enable caffeine for the full duration, then disable
                 set_caffeine(true);
@@ -313,7 +322,14 @@ fn run_worker<F>(
         }
     }
 
-    if stop_flag.load(Ordering::SeqCst) {
+    if let Some(error) = failure_reason {
+        if let Ok(mut snap) = snapshot.lock() {
+            snap.is_running = false;
+            snap.status = "failed".to_string();
+            snap.phase = String::new();
+        }
+        event_sink(ExecutorEvent::Failed(error));
+    } else if stop_flag.load(Ordering::SeqCst) {
         if let Ok(mut snap) = snapshot.lock() {
             snap.is_running = false;
             snap.status = "stopped".to_string();
@@ -337,7 +353,7 @@ fn handle_sleep_step<F>(
     stop_flag: &Arc<AtomicBool>,
     snapshot: &Arc<Mutex<QueueSnapshot>>,
     event_sink: &F,
-) -> bool
+) -> Result<bool, String>
 
 where
     F: Fn(ExecutorEvent) + Send + Sync + 'static,
@@ -359,11 +375,34 @@ where
         snapshot,
         event_sink,
     ) {
-        return false;
+        return Ok(false);
     }
 
     if stop_flag.load(Ordering::SeqCst) {
-        return false;
+        return Ok(false);
+    }
+
+    match remote_mode::wake_lock_status() {
+        Ok(status) if status.requires_sign_in() => event_sink(ExecutorEvent::Log(format!(
+            "  WARNING Windows will show the sign-in screen after wake (AC: {}, DC: {}). Post-wake actions may wait for manual sign-in.",
+            status.ac_requires_sign_in,
+            status.dc_requires_sign_in
+        ))),
+        Ok(_) => {}
+        Err(error) => event_sink(ExecutorEvent::Log(format!(
+            "  WARNING Could not verify wake sign-in policy: {error}"
+        ))),
+    }
+
+    // An explicit sleep request wins over persistent remote mode and does not
+    // silently re-enable it after wake.
+    match remote_mode::disable_before_suspend() {
+        Ok(true) => event_sink(ExecutorEvent::Log("  -> Remote mode disabled; original power settings restored before sleep.".to_string())),
+        Ok(false) => {}
+        Err(e) => {
+            event_sink(ExecutorEvent::Log(format!("  ERROR Remote mode could not be restored before sleep: {e}")));
+            return Err(format!("Remote Mode restore failed before sleep: {e}"));
+        }
     }
 
     // Phase 2: Suspend
@@ -389,7 +428,7 @@ where
             "  -> Aufgewacht. Post-Wake Verzoegerung: {}s",
             cfg.post_wake_delay
         )));
-        countdown(
+        Ok(countdown(
             index,
             cfg.post_wake_delay,
             cfg.post_wake_delay,
@@ -397,14 +436,14 @@ where
             stop_flag,
             snapshot,
             event_sink,
-        )
+        ))
     } else {
         // Fallback: stay awake and count down full sleep duration
         event_sink(ExecutorEvent::Log(format!(
             "  -> Ruhezustand fehlgeschlagen. Bleibe wach und zaehle {} herunter.",
             fmt_time(item.total)
         )));
-        countdown(
+        Ok(countdown(
             index,
             item.total,
             item.total,
@@ -412,7 +451,7 @@ where
             stop_flag,
             snapshot,
             event_sink,
-        )
+        ))
     }
 }
 

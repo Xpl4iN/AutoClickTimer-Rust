@@ -18,7 +18,8 @@
 //!   - `act_set_caffeine`: Direct toggle of screen/sleep keep-awake mode
 //!   - `act_configure_passwordless_wake`: Configure zero-password wake on current machine
 
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead, BufReader, Write};
+use std::net::TcpStream;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -31,12 +32,15 @@ use crate::executor::QueueExecutor;
 use crate::models::{ActionType, Item, SleepConfig};
 use crate::platform::windows::input::get_open_windows;
 use crate::platform::windows::power::{configure_passwordless_wake, set_caffeine};
+use crate::platform::windows::remote_mode;
 use crate::updater::CURRENT_VERSION;
 
 const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
 /// First line that TCP clients must send for authentication (if an api_key is configured).
 /// Format: `{"jsonrpc":"2.0","method":"auth","params":{"key":"<secret>"}}`
 const TCP_AUTH_METHOD: &str = "auth";
+const GUI_MCP_ADDRESS: &str = "127.0.0.1:7890";
+const GUI_MCP_API_KEY_ENV: &str = "AUTOCLICKTIMER_MCP_API_KEY";
 
 #[derive(Debug, Serialize, Deserialize)]
 struct JsonRpcRequest {
@@ -68,6 +72,7 @@ struct JsonRpcError {
 #[derive(Debug, Clone)]
 pub enum McpGuiEvent {
     CaffeineToggled(bool),
+    RemoteModeToggled(remote_mode::RemoteModeStatus),
     QueueScheduled {
         items: Vec<Item>,
         scheduled_start: Option<DateTime<Local>>,
@@ -76,6 +81,7 @@ pub enum McpGuiEvent {
     ActionExecuted {
         item: Item,
         repeat_count: u32,
+        scheduled_start: Option<DateTime<Local>>,
     },
     QueueCancelled,
     Executor(crate::executor::ExecutorEvent),
@@ -105,7 +111,7 @@ impl McpServer {
         }
     }
 
-    pub fn run(&self) -> ! {
+    pub fn run_with_gui_proxy(&self) -> ! {
         let stdin = io::stdin();
         let mut stdout = io::stdout();
 
@@ -117,7 +123,6 @@ impl McpServer {
                     break;
                 }
             };
-
             let trimmed = line.trim();
             if trimmed.is_empty() {
                 continue;
@@ -127,7 +132,7 @@ impl McpServer {
                 Ok(req) => req,
                 Err(e) => {
                     eprintln!("[MCP] parse error: {}", e);
-                    let err_resp = JsonRpcResponse {
+                    send_response(&mut stdout, &JsonRpcResponse {
                         jsonrpc: "2.0".to_string(),
                         id: None,
                         result: None,
@@ -136,14 +141,24 @@ impl McpServer {
                             message: format!("Parse error: {}", e),
                             data: None,
                         }),
-                    };
-                    send_response(&mut stdout, &err_resp);
+                    });
                     continue;
                 }
             };
 
-            if let Some(resp) = self.handle_request(request) {
-                send_response(&mut stdout, &resp);
+            match try_forward_gui_request(&request) {
+                Ok(Some(response)) => send_response(&mut stdout, &response),
+                Ok(None) => {
+                    if let Some(response) = self.handle_request(request) {
+                        send_response(&mut stdout, &response);
+                    }
+                }
+                Err(error) => send_response(&mut stdout, &JsonRpcResponse {
+                    jsonrpc: "2.0".to_string(),
+                    id: request.id,
+                    result: None,
+                    error: Some(JsonRpcError { code: -32000, message: error, data: None }),
+                }),
             }
         }
 
@@ -239,6 +254,8 @@ impl McpServer {
             "act_run_profile" => self.tool_run_profile(args),
             "act_save_profile" => self.tool_save_profile(args),
             "act_get_status" => self.tool_get_status(),
+            "act_get_remote_mode" => serde_json::to_value(remote_mode::status()?).map_err(|e| e.to_string()),
+            "act_set_remote_mode" => self.tool_set_remote_mode(args),
             "act_cancel" => self.tool_cancel(),
             "act_list_windows" => self.tool_list_windows(),
             "act_set_caffeine" => self.tool_set_caffeine(args),
@@ -359,14 +376,21 @@ impl McpServer {
 
         let async_exec = args.get("async_execution").and_then(|v| v.as_bool()).unwrap_or(true);
 
-        if let Some(sink) = &self.gui_sink {
-            sink(McpGuiEvent::ActionExecuted {
-                item: item.clone(),
-                repeat_count: repeat,
-            });
-        }
-
-        self.start_queue(vec![item], scheduled_start, repeat, async_exec)
+        self.start_queue(
+            vec![item.clone()],
+            scheduled_start,
+            repeat,
+            async_exec,
+            || {
+                if let Some(sink) = &self.gui_sink {
+                    sink(McpGuiEvent::ActionExecuted {
+                        item,
+                        repeat_count: repeat,
+                        scheduled_start,
+                    });
+                }
+            },
+        )
     }
 
     fn tool_schedule_queue(&self, args: Value) -> Result<Value, String> {
@@ -439,15 +463,21 @@ impl McpServer {
 
         let async_exec = args.get("async_execution").and_then(|v| v.as_bool()).unwrap_or(true);
 
-        if let Some(sink) = &self.gui_sink {
-            sink(McpGuiEvent::QueueScheduled {
-                items: queue.clone(),
-                scheduled_start,
-                repeat_count: repeat,
-            });
-        }
-
-        self.start_queue(queue, scheduled_start, repeat, async_exec)
+        self.start_queue(
+            queue.clone(),
+            scheduled_start,
+            repeat,
+            async_exec,
+            || {
+                if let Some(sink) = &self.gui_sink {
+                    sink(McpGuiEvent::QueueScheduled {
+                        items: queue,
+                        scheduled_start,
+                        repeat_count: repeat,
+                    });
+                }
+            },
+        )
     }
 
     fn tool_run_profile(&self, args: Value) -> Result<Value, String> {
@@ -467,15 +497,21 @@ impl McpServer {
 
         let async_exec = args.get("async_execution").and_then(|v| v.as_bool()).unwrap_or(true);
 
-        if let Some(sink) = &self.gui_sink {
-            sink(McpGuiEvent::QueueScheduled {
-                items: queue.clone(),
-                scheduled_start,
-                repeat_count: repeat,
-            });
-        }
-
-        self.start_queue(queue, scheduled_start, repeat, async_exec)
+        self.start_queue(
+            queue.clone(),
+            scheduled_start,
+            repeat,
+            async_exec,
+            || {
+                if let Some(sink) = &self.gui_sink {
+                    sink(McpGuiEvent::QueueScheduled {
+                        items: queue,
+                        scheduled_start,
+                        repeat_count: repeat,
+                    });
+                }
+            },
+        )
     }
 
     fn tool_save_profile(&self, args: Value) -> Result<Value, String> {
@@ -537,6 +573,10 @@ impl McpServer {
         let mut val = serde_json::to_value(&snapshot).map_err(|e| e.to_string())?;
         if let Value::Object(ref mut map) = val {
             map.insert("caffeine_active".to_string(), json!(crate::platform::windows::power::is_caffeine_active()));
+            match remote_mode::status() {
+                Ok(status) => { map.insert("remote_mode".to_string(), serde_json::to_value(status).map_err(|e| e.to_string())?); }
+                Err(e) => { map.insert("remote_mode_error".to_string(), json!(e)); }
+            }
         }
         Ok(val)
     }
@@ -555,6 +595,13 @@ impl McpServer {
         }))
     }
 
+    fn tool_set_remote_mode(&self, args: Value) -> Result<Value, String> {
+        let enabled = args.get("enabled").and_then(Value::as_bool).ok_or("Missing required parameter: 'enabled' (boolean)")?;
+        let status = remote_mode::set_enabled(enabled)?;
+        if let Some(sink) = &self.gui_sink { sink(McpGuiEvent::RemoteModeToggled(status.clone())); }
+        serde_json::to_value(status).map_err(|e| e.to_string())
+    }
+
     fn tool_list_windows(&self) -> Result<Value, String> {
         let windows = get_open_windows();
         Ok(json!({
@@ -567,7 +614,7 @@ impl McpServer {
         let active = args.get("active").and_then(|v| v.as_bool()).ok_or("Missing required parameter: 'active' (boolean)")?;
         let duration_secs = args.get("duration_seconds").and_then(|v| v.as_u64());
 
-        set_caffeine(active);
+        let caffeine_generation = set_caffeine(active);
 
         if let Some(sink) = &self.gui_sink {
             sink(McpGuiEvent::CaffeineToggled(active));
@@ -579,9 +626,10 @@ impl McpServer {
                     let sink_opt = self.gui_sink.clone();
                     std::thread::spawn(move || {
                         std::thread::sleep(Duration::from_secs(secs));
-                        set_caffeine(false);
-                        if let Some(sink) = sink_opt {
+                        if crate::platform::windows::power::disable_caffeine_if_generation(caffeine_generation) {
+                            if let Some(sink) = sink_opt {
                             sink(McpGuiEvent::CaffeineToggled(false));
+                            }
                         }
                     });
                     return Ok(json!({
@@ -605,11 +653,18 @@ impl McpServer {
 
     fn tool_configure_passwordless_wake(&self) -> Result<Value, String> {
         match configure_passwordless_wake() {
-            Ok(msg) => Ok(json!({
-                "status": "configured",
-                "message": msg,
-                "details": "ScreenSaverIsSecure was set to 0 and power scheme console lock was configured for the current user session."
-            })),
+            Ok(msg) => {
+                if let Some(sink) = &self.gui_sink {
+                    sink(McpGuiEvent::LogMessage(
+                        "Passwordless wake configured. Windows policy may still require sign-in.".to_string(),
+                    ));
+                }
+                Ok(json!({
+                    "status": "configured",
+                    "message": msg,
+                    "details": "ScreenSaverIsSecure was set to 0 and power scheme console lock was configured for the current user session. Windows policy may still require sign-in."
+                }))
+            }
             Err(e) => Err(format!("Failed to configure passwordless wake: {}", e)),
         }
     }
@@ -620,6 +675,7 @@ impl McpServer {
         start_at: Option<DateTime<Local>>,
         repeat: u32,
         async_exec: bool,
+        on_started: impl FnOnce(),
     ) -> Result<Value, String> {
         let mut executor = self.executor.lock().unwrap();
 
@@ -636,6 +692,7 @@ impl McpServer {
                 sink(McpGuiEvent::Executor(event));
             }
         });
+        on_started();
 
         let initial_snapshot = executor.get_snapshot();
 
@@ -674,6 +731,7 @@ pub fn start_gui_mcp_server(
     executor: Arc<Mutex<QueueExecutor>>,
     gui_sink: Option<Arc<dyn Fn(McpGuiEvent) + Send + Sync>>,
 ) {
+    let bind_host = if api_key.is_some() { "0.0.0.0" } else { "127.0.0.1" };
     let server = Arc::new(McpServer::with_shared(executor, gui_sink));
     let _ = std::thread::Builder::new()
         .name("mcp-tcp-listener".to_string())
@@ -689,7 +747,7 @@ pub fn start_gui_mcp_server(
                     return;
                 }
             };
-            rt.block_on(run_tcp_listener(server, port, api_key));
+            rt.block_on(run_tcp_listener(server, port, api_key, bind_host));
         });
 }
 
@@ -709,6 +767,137 @@ fn send_response(stdout: &mut io::Stdout, resp: &JsonRpcResponse) {
     }
 }
 
+fn connect_gui_mcp() -> Result<Option<(TcpStream, BufReader<TcpStream>)>, String> {
+    let address = GUI_MCP_ADDRESS
+        .parse()
+        .map_err(|e| format!("Invalid GUI MCP address: {e}"))?;
+    let writer = match TcpStream::connect_timeout(&address, Duration::from_millis(250)) {
+        Ok(stream) => stream,
+        Err(error) if matches!(error.kind(), io::ErrorKind::ConnectionRefused | io::ErrorKind::TimedOut) => {
+            return Ok(None);
+        }
+        Err(error) => return Err(format!("Could not connect to GUI MCP: {error}")),
+    };
+    writer
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .map_err(|e| format!("Could not configure GUI MCP read timeout: {e}"))?;
+    writer
+        .set_write_timeout(Some(Duration::from_secs(5)))
+        .map_err(|e| format!("Could not configure GUI MCP write timeout: {e}"))?;
+    let reader = BufReader::new(
+        writer
+            .try_clone()
+            .map_err(|e| format!("Could not prepare GUI MCP reader: {e}"))?,
+    );
+    Ok(Some((writer, reader)))
+}
+
+fn send_gui_request(
+    writer: &mut TcpStream,
+    reader: &mut BufReader<TcpStream>,
+    request: &JsonRpcRequest,
+) -> Result<Option<JsonRpcResponse>, String> {
+    let payload = serde_json::to_string(request).map_err(|e| format!("MCP request error: {e}"))?;
+    writer
+        .write_all(format!("{payload}\n").as_bytes())
+        .and_then(|_| writer.flush())
+        .map_err(|e| format!("GUI MCP write error: {e}"))?;
+    if request.id.is_none() {
+        return Ok(None);
+    }
+    let mut line = String::new();
+    let count = reader
+        .read_line(&mut line)
+        .map_err(|e| format!("GUI MCP read error: {e}"))?;
+    if count == 0 {
+        return Err("GUI MCP closed the connection without a response.".to_string());
+    }
+    serde_json::from_str(line.trim()).map(Some).map_err(|e| format!("Invalid GUI MCP response: {e}"))
+}
+
+fn gui_mcp_handshake(
+    writer: &mut TcpStream,
+    reader: &mut BufReader<TcpStream>,
+) -> Result<(), String> {
+    if let Ok(key) = std::env::var(GUI_MCP_API_KEY_ENV) {
+        if !key.trim().is_empty() {
+            let auth = JsonRpcRequest {
+                jsonrpc: Some("2.0".to_string()),
+                id: Some(json!(0)),
+                method: TCP_AUTH_METHOD.to_string(),
+                params: Some(json!({ "key": key })),
+            };
+            let response = send_gui_request(writer, reader, &auth)?
+                .ok_or_else(|| "GUI MCP returned no auth response.".to_string())?;
+            if let Some(error) = response.error {
+                return Err(format!("GUI MCP authentication failed: {}", error.message));
+            }
+        }
+    }
+
+    let initialize = JsonRpcRequest {
+        jsonrpc: Some("2.0".to_string()),
+        id: Some(json!(1)),
+        method: "initialize".to_string(),
+        params: Some(json!({
+            "protocolVersion": MCP_PROTOCOL_VERSION,
+            "capabilities": {},
+            "clientInfo": { "name": "AutoClickTimer-LocalProxy", "version": CURRENT_VERSION }
+        })),
+    };
+    let response = send_gui_request(writer, reader, &initialize)?
+        .ok_or_else(|| "GUI MCP returned no initialize response.".to_string())?;
+    if let Some(error) = response.error {
+        return Err(format!("GUI MCP initialize failed: {}", error.message));
+    }
+    Ok(())
+}
+
+pub fn try_call_gui_tool(tool_name: &str, arguments: Value) -> Result<Option<Value>, String> {
+    let Some((mut writer, mut reader)) = connect_gui_mcp()? else {
+        return Ok(None);
+    };
+    gui_mcp_handshake(&mut writer, &mut reader)?;
+    let request = JsonRpcRequest {
+        jsonrpc: Some("2.0".to_string()),
+        id: Some(json!(2)),
+        method: "tools/call".to_string(),
+        params: Some(json!({ "name": tool_name, "arguments": arguments })),
+    };
+    let response = send_gui_request(&mut writer, &mut reader, &request)?
+        .ok_or_else(|| "GUI MCP returned no tool response.".to_string())?;
+    if let Some(error) = response.error {
+        return Err(format!("GUI MCP tool error: {}", error.message));
+    }
+    let result = response.result.ok_or_else(|| "GUI MCP returned no tool result.".to_string())?;
+    if result.get("isError").and_then(Value::as_bool).unwrap_or(false) {
+        let message = result
+            .get("content")
+            .and_then(Value::as_array)
+            .and_then(|items| items.first())
+            .and_then(|item| item.get("text"))
+            .and_then(Value::as_str)
+            .unwrap_or("Unknown GUI MCP tool error");
+        return Err(message.to_string());
+    }
+    let text = result
+        .get("content")
+        .and_then(Value::as_array)
+        .and_then(|items| items.first())
+        .and_then(|item| item.get("text"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    Ok(Some(serde_json::from_str(text).unwrap_or_else(|_| json!({ "raw": text }))))
+}
+
+fn try_forward_gui_request(request: &JsonRpcRequest) -> Result<Option<JsonRpcResponse>, String> {
+    let Some((mut writer, mut reader)) = connect_gui_mcp()? else {
+        return Ok(None);
+    };
+    gui_mcp_handshake(&mut writer, &mut reader)?;
+    send_gui_request(&mut writer, &mut reader, request)
+}
+
 /// Launch the MCP server.
 ///
 /// - Always starts the stdio loop (for AI agent tool-call integration).
@@ -720,6 +909,7 @@ pub fn run_mcp_server(tcp_port: Option<u16>, api_key: Option<String>) -> ! {
     let server = Arc::new(McpServer::new());
 
     if let Some(port) = tcp_port {
+        let bind_host = "0.0.0.0";
         let server_stdio = Arc::clone(&server);
         // Spawn a background thread for the stdio loop if stdin is piped (e.g. AI agent)
         std::thread::spawn(move || {
@@ -757,20 +947,21 @@ pub fn run_mcp_server(tcp_port: Option<u16>, api_key: Option<String>) -> ! {
             }
         });
 
-        println!("[MCP-TCP] AutoClickTimer TCP Server listening on 0.0.0.0:{}", port);
+        eprintln!("[MCP-TCP] AutoClickTimer TCP Server listening on {}:{}", bind_host, port);
         if api_key.is_some() {
-            println!("[MCP-TCP] API key authentication is enabled.");
+            eprintln!("[MCP-TCP] API key authentication is enabled.");
         }
         let rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .enable_all()
             .build()
             .expect("[MCP-TCP] Failed to build Tokio runtime");
-        rt.block_on(run_tcp_listener(server, port, api_key));
+        rt.block_on(run_tcp_listener(server, port, api_key, "0.0.0.0"));
         std::process::exit(0);
     } else {
-        // Run stdio loop on the main thread (blocks forever)
-        server.run()
+        // Use the already-running GUI instance when available so stdio MCP
+        // clients share its queue and UI. Fall back to headless execution.
+        server.run_with_gui_proxy()
     }
 }
 
@@ -778,9 +969,14 @@ pub fn run_mcp_server(tcp_port: Option<u16>, api_key: Option<String>) -> ! {
 // Async TCP listener
 // ---------------------------------------------------------------------------
 
-async fn run_tcp_listener(server: Arc<McpServer>, port: u16, api_key: Option<String>) {
+async fn run_tcp_listener(
+    server: Arc<McpServer>,
+    port: u16,
+    api_key: Option<String>,
+    bind_host: &'static str,
+) {
     use tokio::net::TcpListener;
-    let addr = format!("0.0.0.0:{}", port);
+    let addr = format!("{}:{}", bind_host, port);
     let listener = match TcpListener::bind(&addr).await {
         Ok(l) => l,
         Err(e) => {
@@ -1254,6 +1450,16 @@ fn get_tool_definitions() -> Vec<Value> {
             }
         }),
         json!({
+            "name": "act_get_remote_mode",
+            "description": "Read persistent remote-agent power mode and actual Windows setting discrepancies.",
+            "inputSchema": { "type": "object", "properties": {} }
+        }),
+        json!({
+            "name": "act_set_remote_mode",
+            "description": "Enable or disable remote-agent mode. Disable restores captured settings on the original power scheme.",
+            "inputSchema": { "type": "object", "properties": { "enabled": { "type": "boolean" } }, "required": ["enabled"] }
+        }),
+        json!({
             "name": "act_get_cursor_pos",
             "description": "Query current screen coordinates (X, Y) of the Windows mouse cursor.",
             "inputSchema": {
@@ -1357,6 +1563,22 @@ mod tests {
         assert!(tools.iter().any(|t| t["name"] == "act_schedule_queue"));
         assert!(tools.iter().any(|t| t["name"] == "act_get_status"));
         assert!(tools.iter().any(|t| t["name"] == "act_cancel"));
+        assert!(tools.iter().any(|t| t["name"] == "act_get_remote_mode"));
+        let remote = tools.iter().find(|t| t["name"] == "act_set_remote_mode").unwrap();
+        assert_eq!(remote["inputSchema"]["required"], json!(["enabled"]));
+    }
+
+    #[test]
+    fn remote_mode_rejects_invalid_input_without_changing_power_settings() {
+        let server = McpServer::new();
+        for arguments in [json!({}), json!({"enabled": "false"}), json!({"enabled": 1})] {
+            let response = server.handle_request(JsonRpcRequest {
+                jsonrpc: Some("2.0".into()), id: Some(json!(100)),
+                method: "tools/call".into(),
+                params: Some(json!({"name": "act_set_remote_mode", "arguments": arguments})),
+            }).unwrap();
+            assert_eq!(response.result.unwrap()["isError"], true);
+        }
     }
 
     #[test]
@@ -1529,4 +1751,3 @@ mod tests {
         assert_eq!(events.lock().unwrap().len(), 2);
     }
 }
-

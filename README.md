@@ -10,15 +10,21 @@ AutoClick Timer is a high-performance Windows desktop automation utility written
 - **Zero-Admin RTC Sleep & Wake (`asInvoker`):** Native user-mode Win32 waitable wake timers (`CreateWaitableTimerExW` with `fResume=true`) and suspend (`Powrprof.dll`) operate completely without administrator elevation or UAC prompts.
 - **Password-Safe Windows Automation:**
   - Background Win32 `PostMessageW` / `SendMessageW` targeting specific window handles without stealing focus, functioning even when the machine is locked.
-  - Optional zero-password wake configuration (`act configure-wake-lock`) allowing the machine to wake directly to the unlocked desktop without password prompts.
+  - Optional zero-password wake configuration (`act configure-wake-lock`) allowing the machine to wake without a password prompt when Windows policy permits it. Windows security policy can still require sign-in.
 - **Native OS Automation:**
   - Direct Win32 `SendInput` and background window message injection.
   - Native Windows Power Management (`SetThreadExecutionState` for Caffeine keep-awake, `Powrprof.dll` for `SetSuspendState`, RTC wake timers).
-  - Emergency Mouse Failsafe: instant abort when mouse reaches coordinate (0, 0).
-- **Native MCP Server:** Built-in Model Context Protocol (MCP) server over `stdio` (`act mcp`) for direct integration with AI agents (Claude Desktop, Cursor, Antigravity, etc.).
+  - Explicit Emergency Stop: instant abort from the Stop button or Ctrl+Shift+F12. Cursor movement to (0, 0) is ignored for RustDesk compatibility.
+- **Native MCP Server:** Built-in Model Context Protocol (MCP) server over `stdio` (`act mcp`) for direct integration with AI agents (Claude Desktop, Cursor, Antigravity, etc.). When the GUI is running, local CLI and stdio MCP calls are proxied to its shared queue and UI.
 - **Internationalization:** Runtime language toggle between German (DE) and English (EN).
 - **Profile Persistence:** Compatible JSON profile save/load format (`.act`).
 - **Full CLI & MCP Parity:** Every GUI feature is accessible headlessly from PowerShell/cmd and via MCP tool calls.
+
+## What's New in v1.6.0
+
+- **RustDesk-safe emergency stop:** Cursor movement to the top-left corner no longer stops a queue. Use the Stop button or Ctrl+Shift+F12.
+- **Verified passwordless-wake configuration:** The wake configuration command now reports registry, power-plan, and activation failures instead of silently continuing.
+- **Wake behavior clarified:** Windows policy can still require sign-in after wake even when passwordless wake is configured.
 
 ## What's New in v1.5.1
 
@@ -65,6 +71,8 @@ act mcp --tcp-port 7890 --api-key mysecret
 
 When `--tcp-port` is provided the binary listens on `0.0.0.0:<port>` **in addition** to the stdio transport, accepting multiple concurrent clients. Each client speaks the same MCP JSON-RPC 2.0 protocol over a newline-delimited TCP stream.
 
+The GUI also starts port `7890`. Without `AUTOCLICKTIMER_MCP_API_KEY`, its embedded listener is restricted to `127.0.0.1` so local CLI and stdio MCP proxying remain available without exposing unauthenticated power controls. Set that environment variable before starting the GUI to enable Tailscale access; the mobile app must use the same key.
+
 **Authentication (optional but recommended):** If `--api-key` is set, every TCP client must send an `auth` message as its very first request:
 
 ```json
@@ -83,7 +91,7 @@ The companion **AutoClick Remote** Flutter app (`mobile/`) connects to the TCP M
 - **Settings** -- cursor position, passwordless wake config, disconnect
 
 **Setup:**
-1. Open AutoClick Timer (`autoclicktimer.exe`) on your PC (or run headless via `act mcp --tcp-port 7890 --api-key <secret>`)
+1. Open AutoClick Timer (`autoclicktimer.exe`) on your PC. For Tailscale access, set `AUTOCLICKTIMER_MCP_API_KEY` before launching it, or run headless via `act mcp --tcp-port 7890 --api-key <secret>`.
 2. Make sure both devices are on the same Tailscale network
 3. Open AutoClick Remote on your phone, enter your PC's Tailscale IP, port `7890` (and API key if configured)
 4. Tap Connect
@@ -116,6 +124,8 @@ The companion **AutoClick Remote** Flutter app (`mobile/`) connects to the TCP M
 | `act_cancel` | Immediately cancel active timer or queue | (none) |
 | `act_list_windows` | Enumerate visible window titles for window-specific targeting | (none) |
 | `act_set_caffeine` | Direct toggle of screen/sleep keep-awake mode | `active`, `duration_seconds` |
+| `act_get_remote_mode` | Read saved remote-mode intent, effective power settings, and discrepancies | (none) |
+| `act_set_remote_mode` | Enable remote mode or restore its saved settings | `enabled` (boolean) |
 | `act_configure_passwordless_wake` | Configure user session to wake directly without password lock | (none) |
 
 ---
@@ -201,6 +211,26 @@ act queue --step "sleep:2h" --step "click:5s" --save night.act --in 30m
 act caffeine --for 2h
 act caffeine --for 90m
 ```
+
+### `remote-mode` -- Persistent remote-agent power protection
+
+```powershell
+act remote-mode status
+act remote-mode on
+act remote-mode off
+```
+
+When enabled, Remote mode captures the active Windows power scheme and changes only automatic sleep, timed hibernate, lid-close action, and display timeout values. Automatic sleep and timed hibernate are disabled on AC and battery, lid close does nothing, and existing nonzero display timeouts are preserved. A scheme that previously had no display timeout receives 300 seconds on AC and 180 seconds on battery. Critical battery actions, wake passwords, screen-lock security, and other power settings are not changed.
+
+The capture is stored at `%LOCALAPPDATA%\AutoClickTimer\remote-mode.json`. Turning Remote mode off restores those captured values on the original scheme. If you selected another power scheme in the meantime, AutoClickTimer does not switch you away from it. Status reports both the saved intent and whether the settings are currently effective, including any external changes or scheme mismatch.
+
+An explicit scheduled sleep action first turns Remote mode off and restores its snapshot. It remains off after wake. Caffeine is a separate, stronger keep-awake request that also keeps the display on; status reports when Caffeine is active so this conflict is visible.
+
+Caffeine status covers the current AutoClickTimer process; another process or app can independently keep the display on. Remote mode uses native Windows power APIs without simulated input or shell-process polling. Its saved configuration survives app exit; use the toggle, CLI, or MCP to turn it off. A failed change retains the snapshot for a later restore attempt.
+
+Existing `act_execute_action` / `act_schedule_queue` sleep requests and MCP registration (`autoclicktimer.exe mcp`) remain compatible. Restart the MCP connection after updating the executable to discover the new tools. Local CLI commands and stdio MCP calls use the embedded GUI when it is running, so their queue state and actions appear in the UI; they fall back to headless execution when it is not.
+
+This mode does not bypass Windows sign-in after a reboot or guarantee hardware wake from sleep. Keep the laptop ventilated when running with the lid closed.
 
 ### `list-windows` -- Show open window titles
 

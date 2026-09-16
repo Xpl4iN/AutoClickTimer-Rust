@@ -1,9 +1,18 @@
-//! Emergency failsafe monitor (cursor at (0,0)).
+//! Emergency failsafe monitor.
+//!
+//! Remote desktop clients commonly move the pointer to (0, 0) while
+//! connecting. Use an explicit keyboard chord so that reconnecting cannot
+//! stop an unattended queue.
 
-use crate::platform::windows::input::get_cursor_pos;
+use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_CONTROL, VK_F12, VK_SHIFT};
 
-/// Checks if the mouse cursor is at the emergency abort coordinate (0, 0).
+fn key_is_down(key: i32) -> bool {
+    unsafe { (GetAsyncKeyState(key) as u16 & 0x8000) != 0 }
+}
+
+/// Checks whether the explicit emergency-stop chord is currently held.
 pub fn is_failsafe_triggered() -> bool {
-    let (x, y) = get_cursor_pos();
-    x == 0 && y == 0
+    key_is_down(VK_CONTROL.0 as i32)
+        && key_is_down(VK_SHIFT.0 as i32)
+        && key_is_down(VK_F12.0 as i32)
 }

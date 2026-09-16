@@ -261,6 +261,7 @@ component SecondaryButton inherits Rectangle {
 // Caffeine Switch Toggle
 component CaffeineToggle inherits Rectangle {
     in-out property <bool> active: false;
+    in property <bool> enabled: true;
     in property <string> text: "Caffeine";
     callback toggled(bool);
 
@@ -269,6 +270,7 @@ component CaffeineToggle inherits Rectangle {
     background: transparent;
 
     touch := TouchArea {
+        enabled: root.enabled;
         mouse-cursor: pointer;
         clicked => {
             root.active = !root.active;
@@ -335,6 +337,7 @@ export component AppWindow inherits Window {
     callback save_queue();
     callback load_queue();
     callback toggle_caffeine(bool);
+    callback toggle_remote_mode(bool);
     callback switch_language(string);
     callback apply_update();
     callback clear_log();
@@ -348,6 +351,9 @@ export component AppWindow inherits Window {
     in-out property <[QueueItemData]> queue_items: [];
     in-out property <bool> is_running: false;
     in-out property <bool> caffeine_active: false;
+    in-out property <bool> remote_mode_active: false;
+    in-out property <bool> remote_mode_busy: false;
+    in-out property <string> remote_mode_detail: "";
     in-out property <int> repeat_count: 1;
     in-out property <bool> infinite_loop: false;
     in-out property <string> repeat_input: "1";
@@ -362,7 +368,7 @@ export component AppWindow inherits Window {
     in-out property <string> status_text: "";
     in-out property <string> iteration_badge_text: "";
     in-out property <string> cursor_pos_text: "0, 0";
-    in-out property <string> failsafe_text: "Notfall-Stop: Maus ganz oben-links in die Bildschirmecke schieben";
+    in-out property <string> failsafe_text: "Notfall-Stop: Schaltfläche oder Strg+Umschalt+F12 verwenden";
     in-out property <string> clock_preview_text: "";
     in-out property <string> sleep_clock_preview_text: "";
     in-out property <string> pick_btn_text: "Position erfassen (F6)";
@@ -549,6 +555,24 @@ export component AppWindow inherits Window {
         // =========================================================================
         // MAIN SPLIT CONTENT AREA (Left: Form/Presets + Log, Right: Queue)
         // =========================================================================
+        HorizontalLayout {
+            spacing: 12px;
+            CaffeineToggle {
+                active <=> root.remote_mode_active;
+                enabled: !root.remote_mode_busy;
+                width: 125px;
+                text: root.current_language == "DE" ? "Remote-Agent" : "Remote agent";
+                toggled(act) => { root.toggle_remote_mode(act); }
+            }
+            Text {
+                text: root.remote_mode_detail;
+                font-size: 11px;
+                color: #a9a9b4;
+                wrap: word-wrap;
+                vertical-alignment: center;
+                horizontal-stretch: 1;
+            }
+        }
         HorizontalLayout {
             spacing: 16px;
             vertical-stretch: 1;
