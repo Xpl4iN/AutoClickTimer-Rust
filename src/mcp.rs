@@ -850,6 +850,13 @@ fn gui_mcp_handshake(
     if let Some(error) = response.error {
         return Err(format!("GUI MCP initialize failed: {}", error.message));
     }
+    writer
+        .set_read_timeout(None)
+        .map_err(|e| format!("Could not remove GUI MCP read timeout: {e}"))?;
+    reader
+        .get_mut()
+        .set_read_timeout(None)
+        .map_err(|e| format!("Could not remove GUI MCP reader timeout: {e}"))?;
     Ok(())
 }
 
@@ -1217,6 +1224,9 @@ fn resolve_start_time(
     }
 
     if let Some(clock) = clock_str {
+        if let Ok(target) = DateTime::parse_from_rfc3339(clock.trim()) {
+            return Ok(Some(target.with_timezone(&Local)));
+        }
         let time = NaiveTime::parse_from_str(clock.trim(), "%H:%M:%S")
             .or_else(|_| NaiveTime::parse_from_str(clock.trim(), "%H:%M"))
             .map_err(|_| format!("Invalid start_at clock time: '{}'. Expected HH:MM:SS or HH:MM", clock))?;

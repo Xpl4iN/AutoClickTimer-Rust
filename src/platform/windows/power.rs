@@ -4,6 +4,7 @@
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
 use std::process::Command;
+use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -127,10 +128,12 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 static CAFFEINE_ACTIVE: AtomicBool = AtomicBool::new(false);
 static CAFFEINE_GENERATION: AtomicU64 = AtomicU64::new(0);
-static CAFFEINE_WORKER: std::sync::OnceLock<std::sync::mpsc::Sender<(bool, std::sync::mpsc::SyncSender<()>)>> = std::sync::OnceLock::new();
+static CAFFEINE_REQUEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+static CAFFEINE_WORKER: OnceLock<std::sync::mpsc::Sender<(bool, std::sync::mpsc::SyncSender<()>)>> = OnceLock::new();
 
 /// Enable or disable native Windows Caffeine keep-awake.
 pub fn set_caffeine(active: bool) -> u64 {
+    let _request_guard = CAFFEINE_REQUEST_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
     let generation = CAFFEINE_GENERATION.fetch_add(1, Ordering::SeqCst).wrapping_add(1);
     apply_caffeine(active);
     generation
@@ -138,13 +141,12 @@ pub fn set_caffeine(active: bool) -> u64 {
 
 /// Disable Caffeine only if no newer request has superseded the expected one.
 pub fn disable_caffeine_if_generation(expected: u64) -> bool {
-    let next = expected.wrapping_add(1);
-    if CAFFEINE_GENERATION
-        .compare_exchange(expected, next, Ordering::SeqCst, Ordering::SeqCst)
-        .is_err()
-    {
+    let _request_guard = CAFFEINE_REQUEST_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+    if CAFFEINE_GENERATION.load(Ordering::SeqCst) != expected {
         return false;
     }
+    let next = expected.wrapping_add(1);
+    CAFFEINE_GENERATION.store(next, Ordering::SeqCst);
     apply_caffeine(false);
     true
 }

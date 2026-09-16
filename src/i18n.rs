@@ -204,6 +204,8 @@ fn lookup(key: &'static str, is_en: bool) -> &'static str {
         // Status
         ("status_done", false) => "Fertig",
         ("status_done", true) => "Done",
+        ("status_failed", false) => "Fehlgeschlagen",
+        ("status_failed", true) => "Failed",
         ("status_waiting", false) => "Wartet",
         ("status_waiting", true) => "Waiting",
         ("status_running", false) => "Läuft",

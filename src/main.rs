@@ -1011,6 +1011,12 @@ fn sync_queue_to_ui(app: &AppWindow, queue: &[Item]) {
                     Color::from_rgb_u8(74, 222, 128), // Success green
                     1.0f32,
                 ),
+                ItemStatus::Failed => (
+                    t("status_failed"),
+                    t("status_failed").to_string(),
+                    Color::from_rgb_u8(248, 113, 113), // Error red
+                    0.0f32,
+                ),
                 ItemStatus::Waiting => (
                     t("status_waiting"),
                     fmt_time(item.total),
@@ -1128,6 +1134,17 @@ fn handle_executor_event(
             app.set_is_running(false);
             app.set_iteration_badge_text("".into());
             app.set_status_text(format!("Aktion fehlgeschlagen: {}", message).into());
+            {
+                let mut s = state.lock().unwrap();
+                for item in s.queue.iter_mut() {
+                    if item.status == ItemStatus::Running {
+                        item.status = ItemStatus::Failed;
+                        item.rem = 0;
+                        item.phase = ItemPhase::None;
+                    }
+                }
+                sync_queue_to_ui(app, &s.queue);
+            }
             let ts = Local::now().format("%H:%M:%S").to_string();
             let line = format!("[{}] ERROR {}", ts, message);
             let mut s = state.lock().unwrap();

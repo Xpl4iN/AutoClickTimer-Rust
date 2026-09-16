@@ -105,6 +105,7 @@ pub enum ItemStatus {
     Waiting,
     Running,
     Done,
+    Failed,
 }
 
 impl ItemStatus {
@@ -113,6 +114,7 @@ impl ItemStatus {
             ItemStatus::Waiting => "waiting",
             ItemStatus::Running => "running",
             ItemStatus::Done => "done",
+            ItemStatus::Failed => "failed",
         }
     }
 }

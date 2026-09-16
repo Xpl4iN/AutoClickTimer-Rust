@@ -610,13 +610,21 @@ fn run_queue(queue: Vec<Item>, start_at: Option<chrono::DateTime<Local>>, repeat
         "async_execution": false,
     });
     if let Some(target) = start_at {
-        let seconds = (target - Local::now()).num_seconds().max(1);
-        gui_arguments["start_in"] = json!(format!("{}s", seconds));
+        gui_arguments["start_at"] = json!(target.to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
     }
     match try_call_gui_tool("act_schedule_queue", gui_arguments) {
         Ok(Some(result)) => {
             println!("Forwarded to the running GUI:\n{}", serde_json::to_string_pretty(&result).unwrap());
-            process::exit(0);
+            let status = result
+                .get("status")
+                .and_then(Value::as_str)
+                .or_else(|| result.get("snapshot").and_then(|snapshot| snapshot.get("status")).and_then(Value::as_str));
+            process::exit(match status {
+                Some("done") => 0,
+                Some("failsafe") => 2,
+                Some("failed") | Some("stopped") => 1,
+                _ => 1,
+            });
         }
         Err(e) => {
             eprintln!("GUI MCP error: {e}");
