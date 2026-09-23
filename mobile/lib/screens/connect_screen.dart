@@ -1,5 +1,9 @@
+import 'dart:convert';
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -40,7 +44,75 @@ class _ConnectScreenState extends State<ConnectScreen> {
         _portCtrl.text = (prefs.getInt('port') ?? 7890).toString();
         _keyCtrl.text = prefs.getString('apiKey') ?? '';
       });
+      if (prefs.getBool('autoConnect') == true &&
+          _hostCtrl.text.isNotEmpty &&
+          _keyCtrl.text.isNotEmpty) {
+        _connect();
+      }
     }
+  }
+
+  Future<void> _scanPairing() async {
+    var scanned = false;
+    await showDialog<void>(
+      context: context,
+      builder: (dialogContext) => Dialog(
+        child: SizedBox(
+          width: 320,
+          height: 390,
+          child: Column(
+            children: [
+              const Padding(
+                padding: EdgeInsets.all(16),
+                child: Text('Scan the code shown in Pair phone on your PC'),
+              ),
+              Expanded(
+                child: MobileScanner(
+                  onDetect: (capture) {
+                    if (scanned || capture.barcodes.isEmpty) return;
+                    final raw = capture.barcodes.first.rawValue;
+                    if (raw == null) return;
+                    try {
+                      final data = jsonDecode(raw) as Map<String, dynamic>;
+                      final host = data['host'] as String?;
+                      final port = data['port'] as int?;
+                      final key = data['key'] as String?;
+                      if (data['app'] != 'autoclicktimer' ||
+                          host == null ||
+                          InternetAddress.tryParse(host) == null ||
+                          port == null ||
+                          port < 1 ||
+                          port > 65535 ||
+                          key == null ||
+                          key.isEmpty) {
+                        return;
+                      }
+                      scanned = true;
+                      Navigator.of(dialogContext).pop();
+                      if (!mounted) {
+                        return;
+                      }
+                      setState(() {
+                        _hostCtrl.text = host;
+                        _portCtrl.text = port.toString();
+                        _keyCtrl.text = key;
+                        _error = null;
+                      });
+                      _connect();
+                    } catch (_) {
+                      // Keep scanning until an AutoClickTimer pairing code is found.
+                    }
+                  },
+                ),
+              ),
+              TextButton(
+                  onPressed: () => Navigator.of(dialogContext).pop(),
+                  child: const Text('Cancel')),
+            ],
+          ),
+        ),
+      ),
+    );
   }
 
   Future<void> _connect() async {
@@ -58,6 +130,7 @@ class _ConnectScreenState extends State<ConnectScreen> {
     await prefs.setString('host', host);
     await prefs.setInt('port', port);
     await prefs.setString('apiKey', key);
+    await prefs.setBool('autoConnect', key.isNotEmpty);
 
     if (!mounted) return;
     final mcp = context.read<McpService>();
@@ -65,13 +138,18 @@ class _ConnectScreenState extends State<ConnectScreen> {
     mcp.port = port;
     mcp.apiKey = key.isEmpty ? null : key;
 
-    setState(() { _connecting = true; _error = null; });
+    setState(() {
+      _connecting = true;
+      _error = null;
+    });
     try {
       await mcp.connect();
     } catch (e) {
       HapticFeedback.selectionClick();
       if (mounted) {
-        setState(() { _error = e.toString().replaceFirst('Exception: ', ''); });
+        setState(() {
+          _error = e.toString().replaceFirst('Exception: ', '');
+        });
       }
     } finally {
       if (mounted) setState(() => _connecting = false);
@@ -101,10 +179,13 @@ class _ConnectScreenState extends State<ConnectScreen> {
                           end: Alignment.bottomRight,
                         ),
                         shape: BoxShape.circle,
-                        border: Border.all(color: const Color(0xFF3B82F6).withValues(alpha: 0.3)),
+                        border: Border.all(
+                            color:
+                                const Color(0xFF3B82F6).withValues(alpha: 0.3)),
                         boxShadow: [
                           BoxShadow(
-                            color: const Color(0xFF3B82F6).withValues(alpha: 0.2),
+                            color:
+                                const Color(0xFF3B82F6).withValues(alpha: 0.2),
                             blurRadius: 20,
                             spreadRadius: 2,
                           ),
@@ -163,7 +244,8 @@ class _ConnectScreenState extends State<ConnectScreen> {
                       children: [
                         const Row(
                           children: [
-                            Icon(Icons.hub_outlined, size: 16, color: Color(0xFF38BDF8)),
+                            Icon(Icons.hub_outlined,
+                                size: 16, color: Color(0xFF38BDF8)),
                             SizedBox(width: 8),
                             Text(
                               'SERVER CONFIGURATION',
@@ -177,13 +259,21 @@ class _ConnectScreenState extends State<ConnectScreen> {
                           ],
                         ),
                         const SizedBox(height: 14),
+                        OutlinedButton.icon(
+                          onPressed: _connecting ? null : _scanPairing,
+                          icon: const Icon(Icons.qr_code_scanner),
+                          label: const Text('Scan pairing code'),
+                        ),
+                        const SizedBox(height: 12),
                         TextField(
                           controller: _hostCtrl,
-                          style: const TextStyle(fontSize: 14, fontFamily: 'monospace'),
+                          style: const TextStyle(
+                              fontSize: 14, fontFamily: 'monospace'),
                           decoration: const InputDecoration(
                             labelText: 'Tailscale IP / Hostname',
                             hintText: '100.x.y.z',
-                            prefixIcon: Icon(Icons.lan_outlined, size: 18, color: Color(0xFF8B92A5)),
+                            prefixIcon: Icon(Icons.lan_outlined,
+                                size: 18, color: Color(0xFF8B92A5)),
                           ),
                           keyboardType: TextInputType.url,
                         ),
@@ -194,7 +284,8 @@ class _ConnectScreenState extends State<ConnectScreen> {
                               flex: 2,
                               child: TextField(
                                 controller: _portCtrl,
-                                style: const TextStyle(fontSize: 14, fontFamily: 'monospace'),
+                                style: const TextStyle(
+                                    fontSize: 14, fontFamily: 'monospace'),
                                 decoration: const InputDecoration(
                                   labelText: 'Port',
                                 ),
@@ -208,7 +299,7 @@ class _ConnectScreenState extends State<ConnectScreen> {
                                 controller: _keyCtrl,
                                 style: const TextStyle(fontSize: 14),
                                 decoration: const InputDecoration(
-                                  labelText: 'API Key (Optional)',
+                                  labelText: 'Pairing key',
                                 ),
                                 obscureText: true,
                               ),
@@ -218,15 +309,20 @@ class _ConnectScreenState extends State<ConnectScreen> {
                         if (_error != null) ...[
                           const SizedBox(height: 14),
                           Container(
-                            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 12, vertical: 10),
                             decoration: BoxDecoration(
-                              color: const Color(0xFFEF4444).withValues(alpha: 0.1),
+                              color: const Color(0xFFEF4444)
+                                  .withValues(alpha: 0.1),
                               borderRadius: BorderRadius.circular(8),
-                              border: Border.all(color: const Color(0xFFEF4444).withValues(alpha: 0.3)),
+                              border: Border.all(
+                                  color: const Color(0xFFEF4444)
+                                      .withValues(alpha: 0.3)),
                             ),
                             child: Row(
                               children: [
-                                const Icon(Icons.info_outline, color: Color(0xFFEF4444), size: 16),
+                                const Icon(Icons.info_outline,
+                                    color: Color(0xFFEF4444), size: 16),
                                 const SizedBox(width: 8),
                                 Expanded(
                                   child: Text(

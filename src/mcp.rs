@@ -40,7 +40,6 @@ const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
 /// Format: `{"jsonrpc":"2.0","method":"auth","params":{"key":"<secret>"}}`
 const TCP_AUTH_METHOD: &str = "auth";
 const GUI_MCP_ADDRESS: &str = "127.0.0.1:7890";
-const GUI_MCP_API_KEY_ENV: &str = "AUTOCLICKTIMER_MCP_API_KEY";
 
 #[derive(Debug, Serialize, Deserialize)]
 struct JsonRpcRequest {
@@ -728,10 +727,10 @@ impl McpServer {
 pub fn start_gui_mcp_server(
     port: u16,
     api_key: Option<String>,
+    remote_ip: Option<std::net::Ipv4Addr>,
     executor: Arc<Mutex<QueueExecutor>>,
     gui_sink: Option<Arc<dyn Fn(McpGuiEvent) + Send + Sync>>,
 ) {
-    let bind_host = if api_key.is_some() { "0.0.0.0" } else { "127.0.0.1" };
     let server = Arc::new(McpServer::with_shared(executor, gui_sink));
     let _ = std::thread::Builder::new()
         .name("mcp-tcp-listener".to_string())
@@ -747,7 +746,16 @@ pub fn start_gui_mcp_server(
                     return;
                 }
             };
-            rt.block_on(run_tcp_listener(server, port, api_key, bind_host));
+            rt.block_on(async move {
+                if let (Some(ip), Some(key)) = (remote_ip, api_key) {
+                    tokio::join!(
+                        run_tcp_listener(Arc::clone(&server), port, None, "127.0.0.1".to_string()),
+                        run_tcp_listener(server, port, Some(key), ip.to_string()),
+                    );
+                } else {
+                    run_tcp_listener(server, port, None, "127.0.0.1".to_string()).await;
+                }
+            });
         });
 }
 
@@ -819,22 +827,6 @@ fn gui_mcp_handshake(
     writer: &mut TcpStream,
     reader: &mut BufReader<TcpStream>,
 ) -> Result<(), String> {
-    if let Ok(key) = std::env::var(GUI_MCP_API_KEY_ENV) {
-        if !key.trim().is_empty() {
-            let auth = JsonRpcRequest {
-                jsonrpc: Some("2.0".to_string()),
-                id: Some(json!(0)),
-                method: TCP_AUTH_METHOD.to_string(),
-                params: Some(json!({ "key": key })),
-            };
-            let response = send_gui_request(writer, reader, &auth)?
-                .ok_or_else(|| "GUI MCP returned no auth response.".to_string())?;
-            if let Some(error) = response.error {
-                return Err(format!("GUI MCP authentication failed: {}", error.message));
-            }
-        }
-    }
-
     let initialize = JsonRpcRequest {
         jsonrpc: Some("2.0".to_string()),
         id: Some(json!(1)),
@@ -963,7 +955,7 @@ pub fn run_mcp_server(tcp_port: Option<u16>, api_key: Option<String>) -> ! {
             .enable_all()
             .build()
             .expect("[MCP-TCP] Failed to build Tokio runtime");
-        rt.block_on(run_tcp_listener(server, port, api_key, "0.0.0.0"));
+        rt.block_on(run_tcp_listener(server, port, api_key, "0.0.0.0".to_string()));
         std::process::exit(0);
     } else {
         // Use the already-running GUI instance when available so stdio MCP
@@ -980,7 +972,7 @@ async fn run_tcp_listener(
     server: Arc<McpServer>,
     port: u16,
     api_key: Option<String>,
-    bind_host: &'static str,
+    bind_host: String,
 ) {
     use tokio::net::TcpListener;
     let addr = format!("{}:{}", bind_host, port);

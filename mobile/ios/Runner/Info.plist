@@ -8,6 +8,8 @@
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
 	<key>CFBundleDisplayName</key>
 	<string>Autoclicktimer Remote</string>
+	<key>NSCameraUsageDescription</key>
+	<string>Scan the pairing code shown by AutoClickTimer on your PC.</string>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
 	<key>CFBundleIdentifier</key>

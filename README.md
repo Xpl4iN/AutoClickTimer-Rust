@@ -21,6 +21,11 @@ AutoClick Timer is a high-performance Windows desktop automation utility written
 - **Profile Persistence:** Compatible JSON profile save/load format (`.act`).
 - **Full CLI & MCP Parity:** Every GUI feature is accessible headlessly from PowerShell/cmd and via MCP tool calls.
 
+## What's New in v1.6.2
+
+- Pair a phone from the desktop GUI with a generated, saved key and scannable QR code. The bridge listens on the PC's Tailscale address when available.
+- Download the Android app from the pairing panel. The phone can scan and save the connection details, then reconnect automatically on launch.
+
 ## What's New in v1.6.1
 
 - Prepare passwordless wake before sleep so unattended input can reach the desktop after resume.
@@ -78,7 +83,7 @@ act mcp --tcp-port 7890 --api-key mysecret
 
 When `--tcp-port` is provided the binary listens on `0.0.0.0:<port>` **in addition** to the stdio transport, accepting multiple concurrent clients. Each client speaks the same MCP JSON-RPC 2.0 protocol over a newline-delimited TCP stream.
 
-The GUI also starts port `7890`. Without `AUTOCLICKTIMER_MCP_API_KEY`, its embedded listener is restricted to `127.0.0.1` so local CLI and stdio MCP proxying remain available without exposing unauthenticated power controls. Set that environment variable before starting the GUI to enable Tailscale access; the mobile app must use the same key.
+The GUI starts a loopback-only listener on port `7890` for local tools and, when Tailscale is available at launch, a second listener on the PC's Tailscale IP. Open **Pair phone** in the GUI to see the address, port, saved pairing key, and QR code. The key is generated once and saved under the current Windows user's local app data. `AUTOCLICKTIMER_MCP_API_KEY` remains an optional override. The Tailscale listener requires the key.
 
 **Authentication (optional but recommended):** If `--api-key` is set, every TCP client must send an `auth` message as its very first request:
 
@@ -98,10 +103,10 @@ The companion **AutoClick Remote** Flutter app (`mobile/`) connects to the TCP M
 - **Settings** -- cursor position, passwordless wake config, disconnect
 
 **Setup:**
-1. Open AutoClick Timer (`autoclicktimer.exe`) on your PC. For Tailscale access, set `AUTOCLICKTIMER_MCP_API_KEY` before launching it, or run headless via `act mcp --tcp-port 7890 --api-key <secret>`.
+1. Open AutoClick Timer (`autoclicktimer.exe`) on your PC and select **Pair phone**. The panel also links to the Android APK download. For headless use, run `act mcp --tcp-port 7890 --api-key <secret>`.
 2. Make sure both devices are on the same Tailscale network
-3. Open AutoClick Remote on your phone, enter your PC's Tailscale IP, port `7890` (and API key if configured)
-4. Tap Connect
+3. Open AutoClick Remote on your phone and scan the QR code, or enter the displayed Tailscale IP, port `7890`, and pairing key.
+4. Tap Connect if entering the details manually. The phone saves the details and reconnects on subsequent launches.
 
 ### MCP Configuration Example (Claude Desktop / Cursor / Antigravity)
 

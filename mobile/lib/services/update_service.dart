@@ -19,9 +19,10 @@ class UpdateInfo {
 }
 
 class UpdateService {
-  static const String currentVersion = '1.6.0';
+  static const String currentVersion = '1.6.2';
   static const String repo = 'Xpl4iN/AutoClickTimer-Rust';
-  static const MethodChannel _channel = MethodChannel('com.xp.autoclicktimer_remote/updater');
+  static const MethodChannel _channel =
+      MethodChannel('com.xp.autoclicktimer_remote/updater');
 
   /// Compare two semantic version strings (e.g., "1.6.0" > "1.5.1")
   static bool isNewer(String latest, String current) {
@@ -31,8 +32,12 @@ class UpdateService {
     final lParts = lClean.split('.').map((e) => int.tryParse(e) ?? 0).toList();
     final cParts = cClean.split('.').map((e) => int.tryParse(e) ?? 0).toList();
 
-    while (lParts.length < 3) lParts.add(0);
-    while (cParts.length < 3) cParts.add(0);
+    while (lParts.length < 3) {
+      lParts.add(0);
+    }
+    while (cParts.length < 3) {
+      cParts.add(0);
+    }
 
     for (int i = 0; i < 3; i++) {
       if (lParts[i] > cParts[i]) return true;
@@ -49,7 +54,8 @@ class UpdateService {
       final request = await client.getUrl(
         Uri.parse('https://api.github.com/repos/$repo/releases/latest'),
       );
-      request.headers.set('User-Agent', 'AutoClickTimer-Remote/$currentVersion');
+      request.headers
+          .set('User-Agent', 'AutoClickTimer-Remote/$currentVersion');
       request.headers.set('Accept', 'application/vnd.github.v3+json');
 
       final response = await request.close();
@@ -100,7 +106,8 @@ class UpdateService {
     client.connectionTimeout = const Duration(seconds: 15);
     try {
       final request = await client.getUrl(Uri.parse(downloadUrl));
-      request.headers.set('User-Agent', 'AutoClickTimer-Remote/$currentVersion');
+      request.headers
+          .set('User-Agent', 'AutoClickTimer-Remote/$currentVersion');
       final response = await request.close();
 
       if (response.statusCode != 200) {

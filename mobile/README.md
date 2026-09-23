@@ -1,17 +1,10 @@
-# autoclicktimer_remote
+# AutoClick Remote
 
-A new Flutter project.
+The Android companion app controls AutoClick Timer over Tailscale.
 
-## Getting Started
+1. Connect the PC and phone to the same Tailscale network.
+2. Open **Pair phone** in the Windows AutoClick Timer app. Use **Download phone app** there if needed.
+3. In AutoClick Remote, tap **Scan pairing code** and scan the QR code shown on the PC. Alternatively, enter the displayed host, port, and pairing key manually.
+4. The connection details are saved on the phone. The app reconnects automatically on later launches. Use **Disconnect from Host** to stop automatic reconnection.
 
-This project is a starting point for a Flutter application.
-
-A few resources to get you started if this is your first Flutter project:
-
-- [Learn Flutter](https://docs.flutter.dev/get-started/learn-flutter)
-- [Write your first Flutter app](https://docs.flutter.dev/get-started/codelab)
-- [Flutter learning resources](https://docs.flutter.dev/reference/learning-resources)
-
-For help getting started with Flutter development, view the
-[online documentation](https://docs.flutter.dev/), which offers tutorials,
-samples, guidance on mobile development, and a full API reference.
+The Windows app must be running for the phone to connect. If Tailscale starts after the Windows app, restart AutoClick Timer to start its Tailscale listener.

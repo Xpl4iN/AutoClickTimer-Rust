@@ -6,6 +6,7 @@ mod executor;
 mod i18n;
 mod mcp;
 mod models;
+mod pairing;
 mod platform;
 mod updater;
 
@@ -109,6 +110,36 @@ fn main() -> Result<(), slint::PlatformError> {
     refresh_window_list(&main_window);
     main_window.set_pick_btn_text(t("pick_coords_btn").into());
     main_window.set_app_title(format!("AutoClick Timer  v{}", env!("CARGO_PKG_VERSION")).into());
+    let pairing = pairing::load();
+    match &pairing {
+        Ok(details) => {
+            main_window.set_pairing_host(details.tailscale_ip.map(|ip| ip.to_string()).unwrap_or_else(|| "Tailscale unavailable".into()).into());
+            main_window.set_pairing_key(details.key.clone().into());
+            if details.tailscale_ip.is_some() {
+                if let Ok(image) = pairing::qr_image(details) {
+                    main_window.set_pairing_qr(image);
+                    main_window.set_pairing_ready(true);
+                }
+            }
+        }
+        Err(error) => main_window.set_pairing_status(format!("Pairing unavailable: {error}").into()),
+    }
+    {
+        let key = pairing.as_ref().ok().map(|details| details.key.clone());
+        main_window.on_copy_pairing_key(move || {
+            if let Some(key) = &key {
+                if let Ok(mut clipboard) = arboard::Clipboard::new() {
+                    let _ = clipboard.set_text(key.clone());
+                }
+            }
+        });
+    }
+    main_window.on_download_mobile_app(|| {
+        let _ = std::process::Command::new("rundll32.exe")
+            .arg("url.dll,FileProtocolHandler")
+            .arg("https://github.com/Xpl4iN/AutoClickTimer-Rust/releases/latest/download/autoclicktimer-remote.apk")
+            .spawn();
+    });
     // Native reads on a worker keep the UI responsive and reflect CLI/MCP changes.
     {
         let weak = main_window.as_weak();
@@ -228,10 +259,9 @@ fn main() -> Result<(), slint::PlatformError> {
             });
         });
 
-        let api_key = std::env::var("AUTOCLICKTIMER_MCP_API_KEY")
-            .ok()
-            .filter(|key| !key.trim().is_empty());
-        start_gui_mcp_server(7890, api_key, executor_clone, Some(gui_sink));
+        let api_key = pairing.as_ref().ok().map(|details| details.key.clone());
+        let remote_ip = pairing.as_ref().ok().and_then(|details| details.tailscale_ip);
+        start_gui_mcp_server(pairing::PORT, api_key, remote_ip, executor_clone, Some(gui_sink));
     }
 
     // ---- Event Callbacks ----

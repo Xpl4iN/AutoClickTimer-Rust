@@ -2,6 +2,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../services/mcp_service.dart';
 
@@ -13,7 +14,8 @@ class SettingsScreen extends StatefulWidget {
   State<SettingsScreen> createState() => _SettingsScreenState();
 }
 
-class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObserver {
+class _SettingsScreenState extends State<SettingsScreen>
+    with WidgetsBindingObserver {
   bool _configLoading = false;
   bool _updateChecking = false;
   bool _remoteModeLoading = false;
@@ -25,7 +27,8 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     WidgetsBinding.instance.addPostFrameCallback((_) => _refreshRemoteMode());
-    _remoteModeRefreshTimer = Timer.periodic(const Duration(seconds: 10), (_) => _refreshRemoteMode());
+    _remoteModeRefreshTimer = Timer.periodic(
+        const Duration(seconds: 10), (_) => _refreshRemoteMode());
   }
 
   @override
@@ -63,7 +66,9 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
         setState(() => _remoteModeEnabled = r['enabled'] == true);
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text(enabled ? 'Remote-agent power protection enabled' : 'Remote-agent power protection disabled'),
+            content: Text(enabled
+                ? 'Remote-agent power protection enabled'
+                : 'Remote-agent power protection disabled'),
             backgroundColor: const Color(0xFF10B981),
             behavior: SnackBarBehavior.floating,
           ),
@@ -73,7 +78,9 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
       if (mounted) {
         setState(() => _remoteModeEnabled = !enabled);
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Remote mode error: $e'), backgroundColor: const Color(0xFFEF4444)),
+          SnackBar(
+              content: Text('Remote mode error: $e'),
+              backgroundColor: const Color(0xFFEF4444)),
         );
       }
     } finally {
@@ -95,12 +102,15 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
               children: [
                 Icon(Icons.check_circle, color: Colors.white, size: 18),
                 SizedBox(width: 8),
-                Text('You are running the latest version (v${UpdateService.currentVersion})', style: TextStyle(fontWeight: FontWeight.w600)),
+                Text(
+                    'You are running the latest version (v${UpdateService.currentVersion})',
+                    style: TextStyle(fontWeight: FontWeight.w600)),
               ],
             ),
             backgroundColor: const Color(0xFF10B981),
             behavior: SnackBarBehavior.floating,
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+            shape:
+                RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
           ),
         );
       } else {
@@ -109,7 +119,9 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Update check failed: $e'), backgroundColor: const Color(0xFFEF4444)),
+          SnackBar(
+              content: Text('Update check failed: $e'),
+              backgroundColor: const Color(0xFFEF4444)),
         );
       }
     } finally {
@@ -118,15 +130,14 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
   }
 
   void _showUpdateDialog(UpdateInfo info) {
+    double? progress;
+    bool downloading = false;
+    String? downloadError;
     showDialog(
       context: context,
       barrierDismissible: false,
       builder: (ctx) => StatefulBuilder(
         builder: (ctx, setDialogState) {
-          double? progress;
-          bool downloading = false;
-          String? downloadError;
-
           return AlertDialog(
             backgroundColor: const Color(0xFF14151E),
             shape: RoundedRectangleBorder(
@@ -141,13 +152,15 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
                     color: const Color(0xFF10B981).withValues(alpha: 0.15),
                     borderRadius: BorderRadius.circular(10),
                   ),
-                  child: const Icon(Icons.system_update, color: Color(0xFF10B981), size: 22),
+                  child: const Icon(Icons.system_update,
+                      color: Color(0xFF10B981), size: 22),
                 ),
                 const SizedBox(width: 12),
                 Expanded(
                   child: Text(
                     'Update Available (v${info.version})',
-                    style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
+                    style: const TextStyle(
+                        fontSize: 16, fontWeight: FontWeight.w700),
                   ),
                 ),
               ],
@@ -159,11 +172,16 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
                 children: [
                   Text(
                     'Current version: v${UpdateService.currentVersion}\nLatest version: v${info.version}',
-                    style: const TextStyle(fontSize: 12.5, color: Color(0xFF94A3B8)),
+                    style: const TextStyle(
+                        fontSize: 12.5, color: Color(0xFF94A3B8)),
                   ),
                   const SizedBox(height: 12),
                   if (info.releaseNotes.isNotEmpty) ...[
-                    const Text('What\'s New:', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: Color(0xFFE2E8F0))),
+                    const Text('What\'s New:',
+                        style: TextStyle(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w700,
+                            color: Color(0xFFE2E8F0))),
                     const SizedBox(height: 4),
                     Container(
                       padding: const EdgeInsets.all(10),
@@ -176,7 +194,8 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
                         info.releaseNotes,
                         maxLines: 6,
                         overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(fontSize: 11, color: Color(0xFFCBD5E1)),
+                        style: const TextStyle(
+                            fontSize: 11, color: Color(0xFFCBD5E1)),
                       ),
                     ),
                     const SizedBox(height: 12),
@@ -190,13 +209,18 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
                     const SizedBox(height: 8),
                     Center(
                       child: Text(
-                        progress != null ? '${(progress! * 100).toStringAsFixed(0)}% Downloading...' : 'Starting download...',
-                        style: const TextStyle(fontSize: 11, color: Color(0xFF94A3B8)),
+                        progress != null
+                            ? '${(progress! * 100).toStringAsFixed(0)}% Downloading...'
+                            : 'Starting download...',
+                        style: const TextStyle(
+                            fontSize: 11, color: Color(0xFF94A3B8)),
                       ),
                     ),
                   ],
                   if (downloadError != null)
-                    Text('Error: $downloadError', style: const TextStyle(color: Color(0xFFEF4444), fontSize: 11.5)),
+                    Text('Error: $downloadError',
+                        style: const TextStyle(
+                            color: Color(0xFFEF4444), fontSize: 11.5)),
                 ],
               ),
             ),
@@ -204,13 +228,15 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
               if (!downloading)
                 TextButton(
                   onPressed: () => Navigator.of(ctx).pop(),
-                  child: const Text('Later', style: TextStyle(color: Color(0xFF6B7280))),
+                  child: const Text('Later',
+                      style: TextStyle(color: Color(0xFF6B7280))),
                 ),
               ElevatedButton(
                 style: ElevatedButton.styleFrom(
                   backgroundColor: const Color(0xFF10B981),
                   foregroundColor: Colors.white,
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                  shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(8)),
                 ),
                 onPressed: downloading
                     ? null
@@ -247,6 +273,8 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
   Future<void> _disconnect() async {
     HapticFeedback.mediumImpact();
     final mcp = context.read<McpService>();
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool('autoConnect', false);
     await mcp.disconnect();
   }
 
@@ -273,7 +301,8 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
             ),
             backgroundColor: const Color(0xFF10B981),
             behavior: SnackBarBehavior.floating,
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+            shape:
+                RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
             duration: const Duration(seconds: 3),
           ),
         );
@@ -311,7 +340,9 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
               children: [
                 Icon(Icons.mouse, color: Color(0xFF38BDF8), size: 20),
                 SizedBox(width: 8),
-                Text('Current PC Cursor', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+                Text('Current PC Cursor',
+                    style:
+                        TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
               ],
             ),
             content: Container(
@@ -322,13 +353,18 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
               ),
               child: Text(
                 'X: ${r['x']} px\nY: ${r['y']} px',
-                style: const TextStyle(fontSize: 16, fontFamily: 'monospace', fontWeight: FontWeight.w600, color: Color(0xFFF1F5F9)),
+                style: const TextStyle(
+                    fontSize: 16,
+                    fontFamily: 'monospace',
+                    fontWeight: FontWeight.w600,
+                    color: Color(0xFFF1F5F9)),
               ),
             ),
             actions: [
               TextButton(
                 onPressed: () => Navigator.pop(context),
-                child: const Text('Dismiss', style: TextStyle(color: Color(0xFF3B82F6))),
+                child: const Text('Dismiss',
+                    style: TextStyle(color: Color(0xFF3B82F6))),
               ),
             ],
           ),
@@ -337,7 +373,9 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Error: $e'), backgroundColor: const Color(0xFFEF4444)),
+          SnackBar(
+              content: Text('Error: $e'),
+              backgroundColor: const Color(0xFFEF4444)),
         );
       }
     }
@@ -379,12 +417,22 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
                       color: const Color(0xFF10B981).withValues(alpha: 0.12),
                       borderRadius: BorderRadius.circular(8),
                     ),
-                    child: const Icon(Icons.power_settings_new, color: Color(0xFF10B981), size: 18),
+                    child: const Icon(Icons.power_settings_new,
+                        color: Color(0xFF10B981), size: 18),
                   ),
-                  title: const Text('Remote-Agent Power Protection', style: TextStyle(fontWeight: FontWeight.w600, fontSize: 13.5)),
-                  subtitle: const Text('Prevent idle sleep and lid-close sleep while remotely connected', style: TextStyle(color: Color(0xFF8B92A5), fontSize: 11.5)),
+                  title: const Text('Remote-Agent Power Protection',
+                      style: TextStyle(
+                          fontWeight: FontWeight.w600, fontSize: 13.5)),
+                  subtitle: const Text(
+                      'Prevent idle sleep and lid-close sleep while remotely connected',
+                      style:
+                          TextStyle(color: Color(0xFF8B92A5), fontSize: 11.5)),
                   trailing: _remoteModeLoading
-                      ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2, color: Color(0xFF10B981)))
+                      ? const SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(
+                              strokeWidth: 2, color: Color(0xFF10B981)))
                       : Switch.adaptive(
                           value: _remoteModeEnabled,
                           onChanged: mcp.isConnected ? _setRemoteMode : null,
@@ -400,10 +448,17 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
                       color: const Color(0xFF3B82F6).withValues(alpha: 0.12),
                       borderRadius: BorderRadius.circular(8),
                     ),
-                    child: const Icon(Icons.dns_outlined, color: Color(0xFF3B82F6), size: 18),
+                    child: const Icon(Icons.dns_outlined,
+                        color: Color(0xFF3B82F6), size: 18),
                   ),
-                  title: const Text('Target Host Address', style: TextStyle(fontWeight: FontWeight.w600, fontSize: 13.5)),
-                  subtitle: Text('${mcp.host}:${mcp.port}', style: const TextStyle(fontFamily: 'monospace', color: Color(0xFF8B92A5), fontSize: 12)),
+                  title: const Text('Target Host Address',
+                      style: TextStyle(
+                          fontWeight: FontWeight.w600, fontSize: 13.5)),
+                  subtitle: Text('${mcp.host}:${mcp.port}',
+                      style: const TextStyle(
+                          fontFamily: 'monospace',
+                          color: Color(0xFF8B92A5),
+                          fontSize: 12)),
                   trailing: Row(
                     mainAxisSize: MainAxisSize.min,
                     children: [
@@ -412,7 +467,9 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
                         height: 8,
                         decoration: BoxDecoration(
                           shape: BoxShape.circle,
-                          color: mcp.isConnected ? const Color(0xFF10B981) : const Color(0xFFEF4444),
+                          color: mcp.isConnected
+                              ? const Color(0xFF10B981)
+                              : const Color(0xFFEF4444),
                         ),
                       ),
                       const SizedBox(width: 6),
@@ -421,7 +478,9 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
                         style: TextStyle(
                           fontSize: 11,
                           fontWeight: FontWeight.w700,
-                          color: mcp.isConnected ? const Color(0xFF10B981) : const Color(0xFFEF4444),
+                          color: mcp.isConnected
+                              ? const Color(0xFF10B981)
+                              : const Color(0xFFEF4444),
                         ),
                       ),
                     ],
@@ -436,9 +495,14 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
                       color: const Color(0xFFEF4444).withValues(alpha: 0.12),
                       borderRadius: BorderRadius.circular(8),
                     ),
-                    child: const Icon(Icons.logout, color: Color(0xFFEF4444), size: 18),
+                    child: const Icon(Icons.logout,
+                        color: Color(0xFFEF4444), size: 18),
                   ),
-                  title: const Text('Disconnect from Host', style: TextStyle(color: Color(0xFFEF4444), fontWeight: FontWeight.w600, fontSize: 13.5)),
+                  title: const Text('Disconnect from Host',
+                      style: TextStyle(
+                          color: Color(0xFFEF4444),
+                          fontWeight: FontWeight.w600,
+                          fontSize: 13.5)),
                   onTap: _disconnect,
                 ),
               ],
@@ -474,13 +538,24 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
                       color: const Color(0xFFA855F7).withValues(alpha: 0.12),
                       borderRadius: BorderRadius.circular(8),
                     ),
-                    child: const Icon(Icons.lock_open, color: Color(0xFFA855F7), size: 18),
+                    child: const Icon(Icons.lock_open,
+                        color: Color(0xFFA855F7), size: 18),
                   ),
-                  title: const Text('Configure Zero-Password Wake', style: TextStyle(fontWeight: FontWeight.w600, fontSize: 13.5)),
-                  subtitle: const Text('Configures PC power scheme to resume unlocked after RTC sleep', style: TextStyle(color: Color(0xFF8B92A5), fontSize: 11.5)),
+                  title: const Text('Configure Zero-Password Wake',
+                      style: TextStyle(
+                          fontWeight: FontWeight.w600, fontSize: 13.5)),
+                  subtitle: const Text(
+                      'Configures PC power scheme to resume unlocked after RTC sleep',
+                      style:
+                          TextStyle(color: Color(0xFF8B92A5), fontSize: 11.5)),
                   trailing: _configLoading
-                      ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: Color(0xFFA855F7)))
-                      : const Icon(Icons.chevron_right, size: 18, color: Color(0xFF52586B)),
+                      ? const SizedBox(
+                          width: 16,
+                          height: 16,
+                          child: CircularProgressIndicator(
+                              strokeWidth: 2, color: Color(0xFFA855F7)))
+                      : const Icon(Icons.chevron_right,
+                          size: 18, color: Color(0xFF52586B)),
                   onTap: _configLoading ? null : _configureWakeLock,
                 ),
                 const Divider(height: 1, color: Color(0xFF242838)),
@@ -492,11 +567,18 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
                       color: const Color(0xFF38BDF8).withValues(alpha: 0.12),
                       borderRadius: BorderRadius.circular(8),
                     ),
-                    child: const Icon(Icons.ads_click, color: Color(0xFF38BDF8), size: 18),
+                    child: const Icon(Icons.ads_click,
+                        color: Color(0xFF38BDF8), size: 18),
                   ),
-                  title: const Text('Inspect PC Cursor Position', style: TextStyle(fontWeight: FontWeight.w600, fontSize: 13.5)),
-                  subtitle: const Text('Queries active X, Y coordinates on remote screen', style: TextStyle(color: Color(0xFF8B92A5), fontSize: 11.5)),
-                  trailing: const Icon(Icons.chevron_right, size: 18, color: Color(0xFF52586B)),
+                  title: const Text('Inspect PC Cursor Position',
+                      style: TextStyle(
+                          fontWeight: FontWeight.w600, fontSize: 13.5)),
+                  subtitle: const Text(
+                      'Queries active X, Y coordinates on remote screen',
+                      style:
+                          TextStyle(color: Color(0xFF8B92A5), fontSize: 11.5)),
+                  trailing: const Icon(Icons.chevron_right,
+                      size: 18, color: Color(0xFF52586B)),
                   onTap: _showCursorPos,
                 ),
               ],
@@ -530,13 +612,23 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
                   color: const Color(0xFF10B981).withValues(alpha: 0.12),
                   borderRadius: BorderRadius.circular(8),
                 ),
-                child: const Icon(Icons.system_update, color: Color(0xFF10B981), size: 18),
+                child: const Icon(Icons.system_update,
+                    color: Color(0xFF10B981), size: 18),
               ),
-              title: const Text('Check for App Updates', style: TextStyle(fontWeight: FontWeight.w600, fontSize: 13.5)),
-              subtitle: const Text('Current: v${UpdateService.currentVersion} • GitHub Releases', style: TextStyle(color: Color(0xFF8B92A5), fontSize: 11.5)),
+              title: const Text('Check for App Updates',
+                  style:
+                      TextStyle(fontWeight: FontWeight.w600, fontSize: 13.5)),
+              subtitle: const Text(
+                  'Current: v${UpdateService.currentVersion} • GitHub Releases',
+                  style: TextStyle(color: Color(0xFF8B92A5), fontSize: 11.5)),
               trailing: _updateChecking
-                  ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: Color(0xFF10B981)))
-                  : const Icon(Icons.chevron_right, size: 18, color: Color(0xFF52586B)),
+                  ? const SizedBox(
+                      width: 16,
+                      height: 16,
+                      child: CircularProgressIndicator(
+                          strokeWidth: 2, color: Color(0xFF10B981)))
+                  : const Icon(Icons.chevron_right,
+                      size: 18, color: Color(0xFF52586B)),
               onTap: _updateChecking ? null : _checkForUpdate,
             ),
           ),

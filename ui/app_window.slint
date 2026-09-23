@@ -346,6 +346,8 @@ export component AppWindow inherits Window {
     callback set_sleep_time_preset(int, string, int); // amount, unit, sleep_mode
     callback move_item(int, int); // from_index, to_index
     callback pick_cursor_position();
+    callback copy_pairing_key();
+    callback download_mobile_app();
 
     // Bound properties from Rust backend
     in-out property <[QueueItemData]> queue_items: [];
@@ -372,6 +374,12 @@ export component AppWindow inherits Window {
     in-out property <string> clock_preview_text: "";
     in-out property <string> sleep_clock_preview_text: "";
     in-out property <string> pick_btn_text: "Position erfassen (F6)";
+    in-out property <string> pairing_host: "Tailscale unavailable";
+    in-out property <string> pairing_key: "";
+    in-out property <string> pairing_status: "";
+    in-out property <image> pairing_qr;
+    in-out property <bool> pairing_ready: false;
+    property <bool> show_pairing_modal: false;
     in-out property <int> mode_type: 0; // 0 = Timer (Dauer), 1 = Uhrzeit
     in-out property <int> sleep_mode_type: 0; // 0 = Timer (Dauer), 1 = Uhrzeit
 
@@ -563,6 +571,11 @@ export component AppWindow inherits Window {
                 width: 125px;
                 text: root.current_language == "DE" ? "Remote-Agent" : "Remote agent";
                 toggled(act) => { root.toggle_remote_mode(act); }
+            }
+            SecondaryButton {
+                width: 112px;
+                text: root.current_language == "DE" ? "Handy koppeln" : "Pair phone";
+                clicked => { root.show_pairing_modal = true; }
             }
             Text {
                 text: root.remote_mode_detail;
@@ -1966,6 +1979,51 @@ export component AppWindow inherits Window {
     }
 
     // =========================================================================
+    // MODAL DIALOG: MOBILE PAIRING
+    if root.show_pairing_modal: Rectangle {
+        x: 0;
+        y: 0;
+        width: parent.width;
+        height: parent.height;
+        background: #000000cc;
+
+        Rectangle {
+            x: (parent.width - 440px) / 2;
+            y: (parent.height - 600px) / 2;
+            width: 440px;
+            height: 600px;
+            background: #16161a;
+            border-width: 1px;
+            border-color: #3f3f4c;
+            border-radius: 12px;
+
+            VerticalLayout {
+                padding: 20px;
+                spacing: 10px;
+
+                Text { text: root.current_language == "DE" ? "Handy koppeln" : "Pair your phone"; font-size: 18px; font-weight: 700; color: #e8e8ea; }
+                Text { text: root.current_language == "DE" ? "Tailscale auf PC und Handy verbinden. Dann den Code in AutoClick Remote scannen." : "Connect Tailscale on both devices, then scan the code in AutoClick Remote."; font-size: 11px; color: #a9a9b4; wrap: word-wrap; }
+                if root.pairing_ready: Image {
+                    source: root.pairing_qr;
+                    width: 230px;
+                    height: 230px;
+                    image-fit: contain;
+                    horizontal-alignment: center;
+                }
+                if !root.pairing_ready: Text { text: root.pairing_status == "" ? "Connect Tailscale on this PC to show the QR code." : root.pairing_status; color: #fbbf24; font-size: 12px; wrap: word-wrap; }
+                Text { text: "Host: " + root.pairing_host + "     Port: 7890"; font-size: 12px; color: #e8e8ea; }
+                Text { text: root.current_language == "DE" ? "API-Schlüssel:" : "API key:"; font-size: 11px; color: #a9a9b4; }
+                Text { text: root.pairing_key; font-size: 11px; color: #e8e8ea; wrap: word-wrap; }
+                HorizontalLayout {
+                    spacing: 8px;
+                    SecondaryButton { text: root.current_language == "DE" ? "Schlüssel kopieren" : "Copy key"; clicked => { root.copy_pairing_key(); } }
+                    SecondaryButton { text: root.current_language == "DE" ? "Android-App laden" : "Download Android app"; clicked => { root.download_mobile_app(); } }
+                }
+                SecondaryButton { text: root.current_language == "DE" ? "Schließen" : "Close"; clicked => { root.show_pairing_modal = false; } }
+            }
+        }
+    }
+
     // MODAL DIALOG: START LATER
     // =========================================================================
     if root.show_start_later_modal: Rectangle {
