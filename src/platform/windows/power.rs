@@ -38,9 +38,24 @@ pub fn is_admin() -> bool {
     unsafe { IsUserAnAdmin().as_bool() }
 }
 
+fn wake_timer_ticks(total_seconds: u64) -> Result<i64, String> {
+    if total_seconds == 0 {
+        return Err("Sleep duration must be greater than zero".to_string());
+    }
+    i64::try_from(total_seconds)
+        .ok()
+        .and_then(|seconds| seconds.checked_mul(10_000_000))
+        .ok_or_else(|| "Sleep duration is too large for a Windows wake timer".to_string())
+}
+
+fn has_wake_source(power_ready: bool, timer_ready: bool, task_ready: bool) -> bool {
+    power_ready && (timer_ready || task_ready)
+}
+
 /// Creates and configures a native Win32 RTC waitable timer configured to wake the PC.
 /// Does not require Administrator privileges.
 pub fn create_and_set_wake_timer(total_seconds: u64) -> Result<HANDLE, String> {
+    let ticks = wake_timer_ticks(total_seconds)?;
     unsafe {
         let handle = CreateWaitableTimerExW(
             None,
@@ -50,7 +65,7 @@ pub fn create_and_set_wake_timer(total_seconds: u64) -> Result<HANDLE, String> {
         ).map_err(|e| format!("CreateWaitableTimer failed: {}", e))?;
 
         // 100-nanosecond intervals; negative indicates relative time from now
-        let due_time: i64 = -((total_seconds as i64) * 10_000_000);
+        let due_time = -ticks;
 
         SetWaitableTimer(
             handle,
@@ -181,14 +196,21 @@ pub fn is_caffeine_active() -> bool {
 }
 
 /// Execute sleep sequence with retries, wake scheduling, and suspend detection.
-pub fn execute_sleep_with_retry<F>(total_seconds: u64, mut log_fn: F) -> bool
+pub fn execute_sleep_with_retry<F>(total_seconds: u64, mut log_fn: F) -> Result<bool, String>
 where
     F: FnMut(&str),
 {
+    wake_timer_ticks(total_seconds)?;
     for attempt in 1..=MAX_RETRIES {
         log_fn(&format!("  -> Sleep attempt {}/{}...", attempt, MAX_RETRIES));
 
-        let _ = configure_power_wake_timers();
+        let power_ready = match configure_power_wake_timers() {
+            Ok(()) => true,
+            Err(error) => {
+                log_fn(&format!("  WARNING Wake timer power settings failed: {error}"));
+                false
+            }
+        };
 
         // 1. Set native Win32 RTC waitable wake timer (works without admin privileges)
         let timer_handle = match create_and_set_wake_timer(total_seconds) {
@@ -203,14 +225,37 @@ where
         };
 
         // 2. If elevated, also register scheduled task as backup
-        if is_admin() {
-            let wake_at = Local::now() + chrono::Duration::seconds(total_seconds as i64);
-            if let Err(e) = schedule_wake_task(wake_at) {
-                log_fn(&format!("  WARNING Task schedule failed: {}", e));
+        let task_ready = if is_admin() {
+            let wake_at = Local::now().checked_add_signed(chrono::Duration::seconds(total_seconds as i64));
+            match wake_at.ok_or("Wake time exceeds the supported calendar range".to_string())
+                .and_then(schedule_wake_task) {
+                Ok(()) => {
+                    log_fn("  -> Scheduled wake task registered as backup.");
+                    true
+                }
+                Err(error) => {
+                    log_fn(&format!("  WARNING Task schedule failed: {error}"));
+                    false
+                }
             }
+        } else {
+            false
+        };
+
+        if !has_wake_source(power_ready, timer_handle.is_some(), task_ready) {
+            if let Some(handle) = timer_handle {
+                unsafe { let _ = CloseHandle(handle); }
+            }
+            return Err("No usable wake source was armed. Sleep was cancelled so the PC cannot be left asleep without a scheduled wake.".to_string());
         }
 
-        let slept = suspend_and_detect(total_seconds);
+        let slept = match suspend_and_detect(total_seconds) {
+            Ok(slept) => slept,
+            Err(error) => {
+                log_fn(&format!("  WARNING Suspend failed: {error}"));
+                false
+            }
+        };
 
         if let Some(h) = timer_handle {
             unsafe {
@@ -220,7 +265,7 @@ where
 
         if slept {
             log_fn("  -> PC woke successfully.");
-            return true;
+            return Ok(true);
         } else {
             log_fn(&format!(
                 "  WARNING Attempt {}/{} failed: Suspend did not occur",
@@ -231,7 +276,7 @@ where
             }
         }
     }
-    false
+    Ok(false)
 }
 
 fn configure_power_wake_timers() -> Result<(), String> {
@@ -243,14 +288,28 @@ fn configure_power_wake_timers() -> Result<(), String> {
     ];
 
     for (verb, setting, val) in settings {
-        let _ = Command::new("powercfg")
+        let output = Command::new("powercfg")
             .args([format!("/{}", verb), "SCHEME_CURRENT".into(), "SUB_SLEEP".into(), setting.into(), val.into()])
-            .output();
+            .output()
+            .map_err(|error| format!("powercfg {setting} could not run: {error}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "powercfg {setting} failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
     }
 
-    let _ = Command::new("powercfg")
+    let output = Command::new("powercfg")
         .args(["/SETACTIVE", "SCHEME_CURRENT"])
-        .output();
+        .output()
+        .map_err(|error| format!("Could not activate the power scheme: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "Could not activate the power scheme: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
 
     Ok(())
 }
@@ -300,19 +359,21 @@ fn schedule_wake_task(wake_at: DateTime<Local>) -> Result<(), String> {
     Ok(())
 }
 
-fn suspend_and_detect(_expected_sleep_secs: u64) -> bool {
+fn suspend_and_detect(_expected_sleep_secs: u64) -> Result<bool, String> {
     let t_start = Instant::now();
 
     // Trigger suspend directly via Powrprof.dll (no external PowerShell process needed)
     unsafe {
-        let _ = SetSuspendState(BOOLEAN(0), BOOLEAN(0), BOOLEAN(0));
+        if SetSuspendState(BOOLEAN(0), BOOLEAN(0), BOOLEAN(0)).0 == 0 {
+            return Err(format!("SetSuspendState failed: {}", std::io::Error::last_os_error()));
+        }
     }
 
     // Thread sleep continues across system sleep
     thread::sleep(POST_SUSPEND_WAIT);
 
     let elapsed = t_start.elapsed().as_secs();
-    elapsed >= MIN_CONFIRM_BUFFER_SECS
+    Ok(elapsed >= MIN_CONFIRM_BUFFER_SECS)
 }
 
 fn encode_ps(script: &str) -> String {
@@ -347,8 +408,12 @@ fn encode_ps(script: &str) -> String {
 }
 
 /// Trigger system shutdown.
-pub fn shutdown_pc() {
-    let _ = Command::new("shutdown").args(["/s", "/t", "0"]).spawn();
+pub fn shutdown_pc() -> Result<(), String> {
+    Command::new("shutdown")
+        .args(["/s", "/t", "0"])
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("Could not start shutdown: {error}"))
 }
 
 /// Configures user-level settings to allow waking directly without requiring a password prompt.
@@ -552,5 +617,25 @@ fn with_passwordless_wake_rollback(
     match restore_passwordless_wake(screen_saver, wake_policy) {
         Ok(()) => error,
         Err(rollback) => format!("{error}; rollback also failed: {rollback}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{execute_sleep_with_retry, has_wake_source, wake_timer_ticks};
+
+    #[test]
+    fn sleep_needs_a_configured_wake_source() {
+        assert!(!has_wake_source(false, false, false));
+        assert!(!has_wake_source(false, true, true));
+        assert!(!has_wake_source(true, false, false));
+        assert!(has_wake_source(true, true, false));
+        assert!(has_wake_source(true, false, true));
+    }
+
+    #[test]
+    fn invalid_sleep_duration_fails_before_touching_windows_power_settings() {
+        assert!(execute_sleep_with_retry(0, |_| {}).is_err());
+        assert!(wake_timer_ticks(u64::MAX).is_err());
     }
 }

@@ -4,7 +4,7 @@ use std::fs::File;
 use std::io::Write;
 use std::process::Command;
 
-pub const CURRENT_VERSION: &str = "1.6.0";
+pub const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const REPO: &str = "Xpl4iN/AutoClickTimer-Rust";
 
 #[derive(Debug, Clone)]

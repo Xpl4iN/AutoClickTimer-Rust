@@ -10,15 +10,22 @@ AutoClick Timer is a high-performance Windows desktop automation utility written
 - **Zero-Admin RTC Sleep & Wake (`asInvoker`):** Native user-mode Win32 waitable wake timers (`CreateWaitableTimerExW` with `fResume=true`) and suspend (`Powrprof.dll`) operate completely without administrator elevation or UAC prompts.
 - **Password-Safe Windows Automation:**
   - Background Win32 `PostMessageW` / `SendMessageW` targeting specific window handles without stealing focus, functioning even when the machine is locked.
-  - Optional zero-password wake configuration (`act configure-wake-lock`) allowing the machine to wake without a password prompt when Windows policy permits it. Windows security policy can still require sign-in.
+  - Sleep & Wake configures and verifies zero-password wake before suspending, then checks that the desktop is unlocked after wake. The queue stops before sending more input if either check fails. The setting can also be applied manually with `act configure-wake-lock`. Windows security policy can still require sign-in.
 - **Native OS Automation:**
   - Direct Win32 `SendInput` and background window message injection.
   - Native Windows Power Management (`SetThreadExecutionState` for Caffeine keep-awake, `Powrprof.dll` for `SetSuspendState`, RTC wake timers).
   - Explicit Emergency Stop: instant abort from the Stop button or Ctrl+Shift+F12. Cursor movement to (0, 0) is ignored for RustDesk compatibility.
+- **Unattended Safety:** Sleep is cancelled if neither a configured native wake timer nor a scheduled wake task is available. Missing target windows and Windows input API failures mark the queue as failed rather than completing the step. Windows accepting an input event does not prove that the target application acted on it.
 - **Native MCP Server:** Built-in Model Context Protocol (MCP) server over `stdio` (`act mcp`) for direct integration with AI agents (Claude Desktop, Cursor, Antigravity, etc.). When the GUI is running, local CLI and stdio MCP calls are proxied to its shared queue and UI.
 - **Internationalization:** Runtime language toggle between German (DE) and English (EN).
 - **Profile Persistence:** Compatible JSON profile save/load format (`.act`).
 - **Full CLI & MCP Parity:** Every GUI feature is accessible headlessly from PowerShell/cmd and via MCP tool calls.
+
+## What's New in v1.6.1
+
+- Prepare passwordless wake before sleep so unattended input can reach the desktop after resume.
+- Refuse to suspend when no wake source is armed.
+- Fail the queue when a target window is missing or Windows rejects input, instead of silently continuing.
 
 ## What's New in v1.6.0
 

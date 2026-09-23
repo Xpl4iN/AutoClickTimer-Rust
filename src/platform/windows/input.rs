@@ -2,6 +2,7 @@
 //! and window enumeration.
 
 use std::ffi::OsString;
+use std::ffi::c_void;
 use std::os::windows::ffi::OsStringExt;
 use std::thread;
 use std::time::Duration;
@@ -16,9 +17,9 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, FindWindowW, GetClientRect, GetCursorPos, GetForegroundWindow, GetWindowRect,
-    GetWindowTextLengthW, GetWindowTextW, IsWindowVisible, PostMessageW, SendMessageW,
-    SetCursorPos, SetForegroundWindow, WM_CHAR, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN,
-    WM_LBUTTONUP,
+    GetWindowTextLengthW, GetWindowTextW, IsWindowVisible, PostMessageW, SendMessageTimeoutW,
+    SetCursorPos, SetForegroundWindow, SMTO_ABORTIFHUNG, SMTO_ERRORONEXIT, WM_CHAR, WM_KEYDOWN,
+    WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP,
 };
 
 #[link(name = "user32")]
@@ -26,6 +27,60 @@ unsafe extern "system" {
     fn OpenInputDesktop(dwFlags: u32, fInherit: BOOL, dwDesiredAccess: u32) -> windows::Win32::Foundation::HANDLE;
     fn SetThreadDesktop(hDesktop: windows::Win32::Foundation::HANDLE) -> BOOL;
     fn CloseDesktop(hDesktop: windows::Win32::Foundation::HANDLE) -> BOOL;
+    fn GetUserObjectInformationW(
+        hObj: windows::Win32::Foundation::HANDLE,
+        nIndex: i32,
+        pvInfo: *mut c_void,
+        nLength: u32,
+        lpnLengthNeeded: *mut u32,
+    ) -> BOOL;
+}
+
+/// Return whether the interactive input desktop is the user's unlocked desktop.
+/// A lock screen or secure prompt uses another desktop, so global input must wait.
+pub fn is_input_desktop_unlocked() -> Result<bool, String> {
+    const DESKTOP_READOBJECTS: u32 = 0x0001;
+    const UOI_NAME: i32 = 2;
+
+    unsafe {
+        let desktop = OpenInputDesktop(0, BOOL(0), DESKTOP_READOBJECTS);
+        if desktop.is_invalid() || desktop.0.is_null() {
+            return Err(format!(
+                "Cannot inspect the input desktop: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+
+        let mut name = [0u16; 64];
+        let mut needed = 0u32;
+        let result = GetUserObjectInformationW(
+            desktop,
+            UOI_NAME,
+            name.as_mut_ptr().cast(),
+            std::mem::size_of_val(&name) as u32,
+            &mut needed,
+        );
+        let error = if result.0 == 0 {
+            Some(std::io::Error::last_os_error())
+        } else {
+            None
+        };
+        let _ = CloseDesktop(desktop);
+
+        if let Some(error) = error {
+            return Err(format!("Cannot read the input desktop name: {error}"));
+        }
+        let length = name.iter().position(|&ch| ch == 0).unwrap_or(name.len());
+        Ok(String::from_utf16_lossy(&name[..length]).eq_ignore_ascii_case("Default"))
+    }
+}
+
+fn require_unlocked_input_desktop() -> Result<(), String> {
+    if is_input_desktop_unlocked()? {
+        Ok(())
+    } else {
+        Err("Windows is showing a lock or secure screen; global input was not sent".to_string())
+    }
 }
 
 /// Get current mouse cursor screen coordinates (X, Y).
@@ -85,40 +140,41 @@ pub fn get_window_rect_by_title(title: &str) -> Option<(i32, i32, i32, i32)> {
 }
 
 /// Sends a simulated Enter key press globally.
-pub fn send_enter_global() {
-    send_key_pair(VK_RETURN);
+pub fn send_enter_global() -> Result<(), String> {
+    send_key_pair(VK_RETURN)
 }
 
 /// Sends a simulated left mouse click at current cursor position.
-pub fn send_click_global() {
-    send_mouse_event(MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP);
+pub fn send_click_global() -> Result<(), String> {
+    send_mouse_event(MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP)
 }
 
 /// Sends a simulated right mouse click at current cursor position.
 #[allow(dead_code)]
-pub fn send_right_click_global() {
-    send_mouse_event(MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP);
+pub fn send_right_click_global() -> Result<(), String> {
+    send_mouse_event(MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP)
 }
 
 /// Sends a simulated middle mouse click at current cursor position.
 #[allow(dead_code)]
-pub fn send_middle_click_global() {
-    send_mouse_event(MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP);
+pub fn send_middle_click_global() -> Result<(), String> {
+    send_mouse_event(MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP)
 }
 
 /// Sends a simulated double left mouse click.
 #[allow(dead_code)]
-pub fn send_double_click_global() {
-    send_click_global();
+pub fn send_double_click_global() -> Result<(), String> {
+    send_click_global()?;
     thread::sleep(Duration::from_millis(100));
-    send_click_global();
+    send_click_global()
 }
 
 /// Move mouse to (x, y) and trigger the specified button click.
 #[allow(dead_code)]
-pub fn send_click_at(x: i32, y: i32, button: &str) {
+pub fn send_click_at(x: i32, y: i32, button: &str) -> Result<(), String> {
+    require_unlocked_input_desktop()?;
     unsafe {
-        let _ = SetCursorPos(x, y);
+        SetCursorPos(x, y).map_err(|error| format!("Could not move cursor to ({x}, {y}): {error}"))?;
     }
     thread::sleep(Duration::from_millis(50));
     match button.to_lowercase().as_str() {
@@ -129,7 +185,7 @@ pub fn send_click_at(x: i32, y: i32, button: &str) {
     }
 }
 
-fn send_mouse_event(down_flag: windows::Win32::UI::Input::KeyboardAndMouse::MOUSE_EVENT_FLAGS, up_flag: windows::Win32::UI::Input::KeyboardAndMouse::MOUSE_EVENT_FLAGS) {
+fn send_mouse_event(down_flag: windows::Win32::UI::Input::KeyboardAndMouse::MOUSE_EVENT_FLAGS, up_flag: windows::Win32::UI::Input::KeyboardAndMouse::MOUSE_EVENT_FLAGS) -> Result<(), String> {
     let inputs = [
         INPUT {
             r#type: INPUT_MOUSE,
@@ -159,13 +215,12 @@ fn send_mouse_event(down_flag: windows::Win32::UI::Input::KeyboardAndMouse::MOUS
         },
     ];
 
-    unsafe {
-        SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
-    }
+    send_inputs_checked(&inputs, "Mouse click")
 }
 
 /// Copies text to clipboard, simulates Ctrl+V paste, and presses Enter.
 pub fn send_type_global(text: &str) -> Result<(), String> {
+    require_unlocked_input_desktop()?;
     if let Ok(mut clip) = arboard::Clipboard::new() {
         if let Err(e) = clip.set_text(text) {
             return Err(format!("Clipboard set error: {}", e));
@@ -232,13 +287,10 @@ pub fn send_type_global(text: &str) -> Result<(), String> {
         },
     ];
 
-    unsafe {
-        SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
-    }
+    send_inputs_checked(&inputs, "Paste shortcut")?;
 
     thread::sleep(Duration::from_millis(350));
-    send_enter_global();
-    Ok(())
+    send_enter_global()
 }
 
 /// Send a custom key combination (e.g. "ctrl+s", "alt+f4", "escape", "f5", "tab").
@@ -308,16 +360,14 @@ pub fn send_key_combination(combo: &str) -> Result<(), String> {
 
     up_inputs.reverse();
 
-    unsafe {
-        SendInput(&down_inputs, std::mem::size_of::<INPUT>() as i32);
-        thread::sleep(Duration::from_millis(50));
-        SendInput(&up_inputs, std::mem::size_of::<INPUT>() as i32);
-    }
+    send_inputs_checked(&down_inputs, "Key combination press")?;
+    thread::sleep(Duration::from_millis(50));
+    send_inputs_checked(&up_inputs, "Key combination release")?;
 
     Ok(())
 }
 
-fn send_key_pair(vk: VIRTUAL_KEY) {
+fn send_key_pair(vk: VIRTUAL_KEY) -> Result<(), String> {
     let inputs = [
         INPUT {
             r#type: INPUT_KEYBOARD,
@@ -345,8 +395,19 @@ fn send_key_pair(vk: VIRTUAL_KEY) {
         },
     ];
 
-    unsafe {
-        SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
+    send_inputs_checked(&inputs, "Key press")
+}
+
+fn send_inputs_checked(inputs: &[INPUT], action: &str) -> Result<(), String> {
+    require_unlocked_input_desktop()?;
+    let inserted = unsafe { SendInput(inputs, std::mem::size_of::<INPUT>() as i32) };
+    if inserted as usize == inputs.len() {
+        Ok(())
+    } else {
+        Err(format!(
+            "{action}: Windows accepted {inserted} of {} input events",
+            inputs.len()
+        ))
     }
 }
 
@@ -412,52 +473,71 @@ unsafe extern "system" fn enum_find_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
 }
 
 /// Send Enter to background HWND without stealing focus.
-pub fn post_enter_to_hwnd(hwnd: HWND) {
+pub fn post_enter_to_hwnd(hwnd: HWND) -> Result<(), String> {
     unsafe {
-        let _ = PostMessageW(
+        PostMessageW(
             hwnd,
             WM_KEYDOWN,
             WPARAM(VK_RETURN.0 as usize),
             LPARAM(0),
-        );
+        ).map_err(|error| format!("Could not post Enter key down: {error}"))?;
         thread::sleep(Duration::from_millis(50));
-        let _ = PostMessageW(
+        PostMessageW(
             hwnd,
             WM_KEYUP,
             WPARAM(VK_RETURN.0 as usize),
             LPARAM(0),
-        );
+        ).map_err(|error| format!("Could not post Enter key up: {error}"))?;
     }
+    Ok(())
 }
 
 /// Send Left Click to the center of background HWND client area.
-pub fn post_click_to_hwnd(hwnd: HWND) {
+pub fn post_click_to_hwnd(hwnd: HWND) -> Result<(), String> {
     unsafe {
         let mut rect = RECT::default();
-        if GetClientRect(hwnd, &mut rect).is_ok() {
-            let w = rect.right - rect.left;
-            let h = rect.bottom - rect.top;
-            let x = (w / 2) as i32;
-            let y = (h / 2) as i32;
-            let lparam = ((y << 16) | (x & 0xFFFF)) as isize;
-
-            let _ = PostMessageW(hwnd, WM_LBUTTONDOWN, WPARAM(1), LPARAM(lparam));
-            thread::sleep(Duration::from_millis(50));
-            let _ = PostMessageW(hwnd, WM_LBUTTONUP, WPARAM(0), LPARAM(lparam));
+        GetClientRect(hwnd, &mut rect)
+            .map_err(|error| format!("Could not read target window client area: {error}"))?;
+        let w = rect.right - rect.left;
+        let h = rect.bottom - rect.top;
+        if w <= 0 || h <= 0 {
+            return Err("Target window has no clickable client area".to_string());
         }
+        let x = w / 2;
+        let y = h / 2;
+        let lparam = ((y << 16) | (x & 0xFFFF)) as isize;
+
+        PostMessageW(hwnd, WM_LBUTTONDOWN, WPARAM(1), LPARAM(lparam))
+            .map_err(|error| format!("Could not post mouse button down: {error}"))?;
+        thread::sleep(Duration::from_millis(50));
+        PostMessageW(hwnd, WM_LBUTTONUP, WPARAM(0), LPARAM(lparam))
+            .map_err(|error| format!("Could not post mouse button up: {error}"))?;
     }
+    Ok(())
 }
 
 /// Send text character by character via WM_CHAR, followed by Enter.
-pub fn send_text_to_hwnd(hwnd: HWND, text: &str) {
+pub fn send_text_to_hwnd(hwnd: HWND, text: &str) -> Result<(), String> {
     unsafe {
-        for ch in text.chars() {
-            let _ = SendMessageW(hwnd, WM_CHAR, WPARAM(ch as usize), LPARAM(0));
+        for ch in text.encode_utf16() {
+            let accepted = SendMessageTimeoutW(
+                hwnd,
+                WM_CHAR,
+                WPARAM(ch as usize),
+                LPARAM(0),
+                SMTO_ABORTIFHUNG | SMTO_ERRORONEXIT,
+                1_000,
+                None,
+            );
+            if accepted.0 == 0 {
+                return Err("Target window rejected or timed out while receiving text".to_string());
+            }
             thread::sleep(Duration::from_millis(10));
         }
         thread::sleep(Duration::from_millis(100));
-        post_enter_to_hwnd(hwnd);
+        post_enter_to_hwnd(hwnd)?;
     }
+    Ok(())
 }
 
 /// Bring target HWND to foreground, dispatch action, then optionally restore previous foreground window.
@@ -466,40 +546,44 @@ pub fn execute_with_foreground(
     action: &crate::models::ActionType,
     prompt: &str,
 ) -> Result<(), String> {
+    require_unlocked_input_desktop()?;
     unsafe {
         let prev_hwnd = GetForegroundWindow();
-        let _ = SetForegroundWindow(hwnd);
+        if !SetForegroundWindow(hwnd).as_bool() && GetForegroundWindow() != hwnd {
+            return Err("Could not focus the target window".to_string());
+        }
         thread::sleep(Duration::from_millis(200));
+        if GetForegroundWindow() != hwnd {
+            return Err("Target window lost focus before input was sent".to_string());
+        }
 
-        match action {
+        let result = (|| -> Result<(), String> { match action {
             crate::models::ActionType::Enter => {
-                send_enter_global();
+                send_enter_global()
             }
             crate::models::ActionType::Click => {
                 let mut rect = RECT::default();
-                if GetWindowRect(hwnd, &mut rect).is_ok() {
-                    let cx = rect.left + (rect.right - rect.left) / 2;
-                    let cy = rect.top + (rect.bottom - rect.top) / 2;
-                    let _ = SetCursorPos(cx, cy);
-                    thread::sleep(Duration::from_millis(50));
-                    send_click_global();
-                } else {
-                    send_click_global();
-                }
+                GetWindowRect(hwnd, &mut rect)
+                    .map_err(|error| format!("Could not read target window bounds: {error}"))?;
+                let cx = rect.left + (rect.right - rect.left) / 2;
+                let cy = rect.top + (rect.bottom - rect.top) / 2;
+                SetCursorPos(cx, cy)
+                    .map_err(|error| format!("Could not move cursor to target window: {error}"))?;
+                thread::sleep(Duration::from_millis(50));
+                send_click_global()
             }
             crate::models::ActionType::Type => {
-                let _ = send_type_global(prompt);
+                send_type_global(prompt)
             }
-            _ => {}
-        }
+            _ => Err("This action cannot be sent to a foreground window".to_string()),
+        } })();
 
         if !prev_hwnd.is_invalid() && prev_hwnd.0 != std::ptr::null_mut() && prev_hwnd != hwnd {
             thread::sleep(Duration::from_millis(200));
             let _ = SetForegroundWindow(prev_hwnd);
         }
+        result
     }
-
-    Ok(())
 }
 
 /// Retrieve titles of all visible open windows.

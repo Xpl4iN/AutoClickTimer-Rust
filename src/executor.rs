@@ -13,10 +13,13 @@ use crate::i18n::fmt_time;
 use crate::models::{ActionType, Item, ItemPhase, ItemStatus, QueueItemSummary, QueueSnapshot};
 use crate::platform::windows::failsafe::is_failsafe_triggered;
 use crate::platform::windows::input::{
-    execute_with_foreground, find_window_by_title, post_click_to_hwnd, post_enter_to_hwnd,
-    send_click_global, send_enter_global, send_text_to_hwnd, send_type_global,
+    execute_with_foreground, find_window_by_title, is_input_desktop_unlocked,
+    post_click_to_hwnd, post_enter_to_hwnd, send_click_global, send_enter_global,
+    send_text_to_hwnd, send_type_global,
 };
-use crate::platform::windows::power::{execute_sleep_with_retry, set_caffeine, shutdown_pc};
+use crate::platform::windows::power::{
+    configure_passwordless_wake, execute_sleep_with_retry, set_caffeine, shutdown_pc,
+};
 use crate::platform::windows::remote_mode;
 
 const MAX_ACTION_RETRIES: u32 = 3;
@@ -281,9 +284,16 @@ fn run_worker<F>(
             } else {
                 let done = countdown(i, item.total, item.total, ItemPhase::None, &stop_flag, &snapshot, &event_sink);
                 if done {
-                    dispatch_with_retry(item, &event_sink);
+                    match dispatch_with_retry(item, &event_sink) {
+                        Ok(()) => true,
+                        Err(error) => {
+                            failure_reason = Some(error);
+                            false
+                        }
+                    }
+                } else {
+                    false
                 }
-                done
             };
 
             if !completed || stop_flag.load(Ordering::SeqCst) {
@@ -327,6 +337,11 @@ fn run_worker<F>(
             snap.is_running = false;
             snap.status = "failed".to_string();
             snap.phase = String::new();
+            snap.remaining_seconds = 0;
+            let failed_index = snap.current_index;
+            if let Some(item) = snap.items.get_mut(failed_index) {
+                item.status = "failed".to_string();
+            }
         }
         event_sink(ExecutorEvent::Failed(error));
     } else if stop_flag.load(Ordering::SeqCst) {
@@ -360,6 +375,10 @@ where
 {
     let cfg = &item.sleep_cfg;
 
+    if item.total == 0 {
+        return Err("Sleep & Wake needs a duration greater than zero".to_string());
+    }
+
     // Phase 1: Pre-sleep grace countdown
     event_sink(ExecutorEvent::Log(format!(
         "  -> Vorbereitung: {}s Wartezeit bevor PC in Ruhezustand geht.",
@@ -382,18 +401,6 @@ where
         return Ok(false);
     }
 
-    match remote_mode::wake_lock_status() {
-        Ok(status) if status.requires_sign_in() => event_sink(ExecutorEvent::Log(format!(
-            "  WARNING Windows will show the sign-in screen after wake (AC: {}, DC: {}). Post-wake actions may wait for manual sign-in.",
-            status.ac_requires_sign_in,
-            status.dc_requires_sign_in
-        ))),
-        Ok(_) => {}
-        Err(error) => event_sink(ExecutorEvent::Log(format!(
-            "  WARNING Could not verify wake sign-in policy: {error}"
-        ))),
-    }
-
     // An explicit sleep request wins over persistent remote mode and does not
     // silently re-enable it after wake.
     match remote_mode::disable_before_suspend() {
@@ -403,6 +410,21 @@ where
             event_sink(ExecutorEvent::Log(format!("  ERROR Remote mode could not be restored before sleep: {e}")));
             return Err(format!("Remote Mode restore failed before sleep: {e}"));
         }
+    }
+
+    // Remote mode restoration can reactivate the power scheme. Configure and
+    // verify its wake policy only after that restoration, before suspending.
+    configure_passwordless_wake().map_err(|error| {
+        format!(
+            "Sleep & Wake stopped before suspend: Windows could not be configured to resume without sign-in: {error}"
+        )
+    })?;
+    event_sink(ExecutorEvent::Log(
+        "  -> Passwordless wake configured and verified for the current power scheme.".to_string(),
+    ));
+
+    if stop_flag.load(Ordering::SeqCst) {
+        return Ok(false);
     }
 
     // Phase 2: Suspend
@@ -420,7 +442,7 @@ where
 
     let slept = execute_sleep_with_retry(item.total, |msg| {
         event_sink(ExecutorEvent::Log(msg.to_string()));
-    });
+    }).map_err(|error| format!("Sleep & Wake stopped: {error}"))?;
 
     if slept {
         // Phase 3: Post-wake delay
@@ -428,7 +450,7 @@ where
             "  -> Aufgewacht. Post-Wake Verzoegerung: {}s",
             cfg.post_wake_delay
         )));
-        Ok(countdown(
+        let completed = countdown(
             index,
             cfg.post_wake_delay,
             cfg.post_wake_delay,
@@ -436,7 +458,31 @@ where
             stop_flag,
             snapshot,
             event_sink,
-        ))
+        );
+        if completed {
+            // Windows may need a moment to switch from its wake screen to the
+            // user's desktop, especially when post_wake_delay is set to zero.
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                if stop_flag.load(Ordering::SeqCst) {
+                    return Ok(false);
+                }
+                match is_input_desktop_unlocked() {
+                    Ok(true) => break,
+                    Ok(false) if Instant::now() < deadline => {}
+                    Ok(false) => return Err(
+                        "Windows is still showing a lock or secure screen after wake; queued input was stopped."
+                            .to_string(),
+                    ),
+                    Err(_) if Instant::now() < deadline => {}
+                    Err(error) => return Err(format!(
+                        "Sleep & Wake cannot verify the unlocked desktop after wake: {error}"
+                    )),
+                }
+                thread::sleep(Duration::from_millis(250));
+            }
+        }
+        Ok(completed)
     } else {
         // Fallback: stay awake and count down full sleep duration
         event_sink(ExecutorEvent::Log(format!(
@@ -517,10 +563,16 @@ where
     false
 }
 
-fn dispatch_with_retry<F>(item: &Item, event_sink: &F)
+enum DispatchFailure {
+    Retryable(String),
+    Terminal(String),
+}
+
+fn dispatch_with_retry<F>(item: &Item, event_sink: &F) -> Result<(), String>
 where
     F: Fn(ExecutorEvent) + Send + Sync + 'static,
 {
+    let mut last_error = String::new();
     for attempt in 1..=MAX_ACTION_RETRIES {
         match dispatch_single_action(item) {
             Ok(()) => {
@@ -528,13 +580,17 @@ where
                     "  -> Aktion '{}' ausgefuehrt.",
                     item.action.as_str()
                 )));
-                return;
+                return Ok(());
             }
-            Err(e) => {
+            Err(DispatchFailure::Terminal(error)) => {
+                return Err(format!("Action '{}' failed: {error}", item.label));
+            }
+            Err(DispatchFailure::Retryable(error)) => {
                 event_sink(ExecutorEvent::Log(format!(
                     "  WARNUNG Aktions-Versuch {}/{} fehlgeschlagen: {}",
-                    attempt, MAX_ACTION_RETRIES, e
+                    attempt, MAX_ACTION_RETRIES, error
                 )));
+                last_error = error;
                 if attempt < MAX_ACTION_RETRIES {
                     thread::sleep(ACTION_RETRY_DELAY);
                 }
@@ -542,43 +598,46 @@ where
         }
     }
 
-    event_sink(ExecutorEvent::Log(format!(
-        "  FEHLER Aktion nach {} Versuchen nicht ausfuehrbar -- uebersprungen.",
-        MAX_ACTION_RETRIES
-    )));
+    Err(format!(
+        "Action '{}' failed after {} attempts: {last_error}",
+        item.label, MAX_ACTION_RETRIES
+    ))
 }
 
-fn dispatch_single_action(item: &Item) -> Result<(), String> {
+fn dispatch_single_action(item: &Item) -> Result<(), DispatchFailure> {
     thread::sleep(Duration::from_millis(200));
 
+    if item.action == ActionType::Shutdown {
+        return shutdown_pc().map_err(DispatchFailure::Terminal);
+    }
+    if item.action == ActionType::Sleep || item.action == ActionType::Caffeine {
+        return Ok(());
+    }
+
     let target_hwnd = if !item.target_window.is_empty() {
-        find_window_by_title(&item.target_window)
+        Some(find_window_by_title(&item.target_window).ok_or_else(|| {
+            DispatchFailure::Retryable(format!(
+                "Target window '{}' was not found",
+                item.target_window
+            ))
+        })?)
     } else {
         None
     };
 
     if let Some(hwnd) = target_hwnd {
         if item.require_foreground {
-            return execute_with_foreground(hwnd, &item.action, &item.prompt);
+            return execute_with_foreground(hwnd, &item.action, &item.prompt)
+                .map_err(DispatchFailure::Terminal);
         } else {
             // Background dispatch without focus stealing
-            match item.action {
-                ActionType::Enter => {
-                    post_enter_to_hwnd(hwnd);
-                    return Ok(());
-                }
-                ActionType::Click => {
-                    post_click_to_hwnd(hwnd);
-                    return Ok(());
-                }
-                ActionType::Type => {
-                    send_text_to_hwnd(hwnd, &item.prompt);
-                    return Ok(());
-                }
-                ActionType::Sleep    => return Ok(()),
-                ActionType::Shutdown => { shutdown_pc(); return Ok(()); }
-                ActionType::Caffeine => return Ok(()), // handled in run_worker
+            return match item.action {
+                ActionType::Enter => post_enter_to_hwnd(hwnd),
+                ActionType::Click => post_click_to_hwnd(hwnd),
+                ActionType::Type => send_text_to_hwnd(hwnd, &item.prompt),
+                _ => Ok(()),
             }
+            .map_err(DispatchFailure::Terminal);
         }
     }
 
@@ -588,7 +647,7 @@ fn dispatch_single_action(item: &Item) -> Result<(), String> {
         ActionType::Click    => {
             let btn = item.click_btn.as_deref().unwrap_or("left");
             if let (Some(x), Some(y)) = (item.click_x, item.click_y) {
-                crate::platform::windows::input::send_click_at(x, y, btn);
+                crate::platform::windows::input::send_click_at(x, y, btn)
             } else {
                 match btn.to_lowercase().as_str() {
                     "right" => crate::platform::windows::input::send_right_click_global(),
@@ -598,11 +657,39 @@ fn dispatch_single_action(item: &Item) -> Result<(), String> {
                 }
             }
         }
-        ActionType::Type     => send_type_global(&item.prompt)?,
-        ActionType::Sleep    => {}
-        ActionType::Shutdown => shutdown_pc(),
-        ActionType::Caffeine => {} // handled separately in run_worker
+        ActionType::Type     => send_type_global(&item.prompt),
+        ActionType::Sleep | ActionType::Shutdown | ActionType::Caffeine => Ok(()),
     }
+    .map_err(DispatchFailure::Terminal)
+}
 
-    Ok(())
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn missing_target_fails_queue_without_sending_global_input() {
+        let mut item = Item::new(0, ActionType::Enter);
+        item.label = "targeted Enter".to_string();
+        item.target_window = format!("AutoClickTimer_missing_window_{}", std::process::id());
+        let snapshot = Arc::new(Mutex::new(QueueSnapshot::default()));
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let collected = Arc::clone(&events);
+
+        run_worker(
+            vec![item],
+            None,
+            1,
+            Arc::new(AtomicBool::new(false)),
+            Arc::clone(&snapshot),
+            move |event| collected.lock().unwrap().push(event),
+        );
+
+        let result = snapshot.lock().unwrap();
+        assert_eq!(result.status, "failed");
+        assert_eq!(result.items[0].status, "failed");
+        let events = events.lock().unwrap();
+        assert!(events.iter().any(|event| matches!(event, ExecutorEvent::Failed(_))));
+        assert!(!events.iter().any(|event| matches!(event, ExecutorEvent::AllDone { .. })));
+    }
 }
